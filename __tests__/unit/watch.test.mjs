@@ -38,9 +38,12 @@ function sleep(ms) {
 }
 
 function plantProjection(root, body = '{"_meta":{},"sessions":{}}') {
-  const projDir = join(root, 'tickets/_logs');
-  mkdirSync(projDir, { recursive: true });
-  const path = join(projDir, 'sessions-db.json');
+  // Day 4 layout: rootPath IS the storage dir, projection lives directly
+  // inside (no `tickets/_logs/` prefix). The legacy form is still supported
+  // by passing `opts.paths.projectionJson` to watchProjection — see the
+  // backward-compat test below.
+  mkdirSync(root, { recursive: true });
+  const path = join(root, 'sessions-db.json');
   writeFileSync(path, body);
   return path;
 }
@@ -108,11 +111,12 @@ describe('watchProjection', () => {
     // When the file doesn't exist yet, fs.watch can't attach. The poll
     // loop must still detect the file's appearance and fire.
     const root = mkTmp();
-    mkdirSync(join(root, 'tickets/_logs'), { recursive: true });
     const events = [];
     let watcher;
     try {
-      const path = join(root, 'tickets/_logs/sessions-db.json');
+      // Day 4 layout: rootPath IS the storage dir; projection lives directly
+      // inside as `sessions-db.json`.
+      const path = join(root, 'sessions-db.json');
       // Start the watcher with NO file present.
       watcher = watchProjection(
         root,

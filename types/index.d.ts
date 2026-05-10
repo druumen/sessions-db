@@ -121,3 +121,7 @@ export type WorkspaceHashFromCwd = typeof import('./transcript.d.mts').workspace
 
 // git-context.mjs
 export type GitContextFn = typeof import('./git-context.d.mts').gitContext;
+
+// paths.mjs (Day 4 — storage path resolution chain)
+export type ResolveStoragePaths = typeof import('./paths.d.mts').resolveStoragePaths;
+export type PathsFromRoot = typeof import('./paths.d.mts').pathsFromRoot;

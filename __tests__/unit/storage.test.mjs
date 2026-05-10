@@ -993,6 +993,101 @@ describe('storage.mjs', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Day 4: backward-compat for the three opts-shape forms.
+//
+// These tests prove that storage primitives honor each of the three input
+// shapes the resolver supports:
+//   - opts.paths   (legacy storage-test form — fully-formed override)
+//   - opts.rootPath (Day 4 form — rootPath IS the storage dir)
+//   - opts.root   (legacy operations / CLI form — anchors `tickets/_logs/`)
+//
+// The high-volume tests above already exercise opts.paths; here we add
+// targeted round-trips for the other two shapes plus an interop check
+// that load(rootPath) sees what append(paths) wrote when both point to
+// the same files.
+// ---------------------------------------------------------------------------
+
+describe('storage.mjs — Day 4 path resolution shapes', () => {
+  it('opts.rootPath: append + load round-trips through canonical filenames', async () => {
+    const rootPath = mkTmp();
+    try {
+      // Day 4 form: rootPath IS the storage dir — files live directly inside.
+      const e = newEvent({ op: 'alias_set', stable_id: SID_A, payload: { alias: 'a' } });
+      await appendEvent(e, { rootPath });
+      // Append at the canonical filename inside rootPath.
+      const written = readFileSync(join(rootPath, 'sessions-db-events.jsonl'), 'utf8');
+      assert.equal(written.trim().split('\n').length, 1);
+      // loadProjection with rootPath rebuilds from the same file.
+      const proj = await loadProjection({ rootPath });
+      assert.equal(proj._meta.event_count, 1);
+    } finally {
+      rmSync(rootPath, { recursive: true, force: true });
+    }
+  });
+
+  it('opts.root: append + load round-trips through legacy tickets/_logs/ layout', async () => {
+    const root = mkTmp();
+    try {
+      // Legacy operations form: opts.root is the parent of tickets/_logs/.
+      const e = newEvent({ op: 'alias_set', stable_id: SID_A, payload: { alias: 'l' } });
+      await appendEvent(e, { root });
+      // Legacy layout — events.jsonl lives under tickets/_logs/.
+      const written = readFileSync(
+        join(root, 'tickets', '_logs', 'sessions-db-events.jsonl'),
+        'utf8',
+      );
+      assert.equal(written.trim().split('\n').length, 1);
+      const proj = await loadProjection({ root });
+      assert.equal(proj._meta.event_count, 1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('opts.paths still wins over rootPath / root (legacy storage-test shape preserved)', async () => {
+    const dir = mkTmp();
+    const decoyRoot = mkTmp();
+    try {
+      const paths = {
+        eventsJsonl: join(dir, 'events.jsonl'),
+        projectionJson: join(dir, 'projection.json'),
+        lockFile: join(dir, 'projection.lock'),
+      };
+      const e = newEvent({ op: 'alias_set', stable_id: SID_A, payload: { alias: 'p' } });
+      // Pass both `paths` AND `rootPath` — paths must win.
+      await appendEvent(e, { paths, rootPath: decoyRoot });
+      assert.ok(existsSync(paths.eventsJsonl), 'paths.eventsJsonl should be written');
+      // The rootPath-based location should remain untouched.
+      assert.equal(
+        existsSync(join(decoyRoot, 'sessions-db-events.jsonl')), false,
+        'rootPath-based events.jsonl must NOT exist when paths takes precedence',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(decoyRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('tryUpdateProjection with opts.rootPath honors Day 4 layout', async () => {
+    const rootPath = mkTmp();
+    try {
+      const e = newEvent({
+        op: 'session_seen',
+        stable_id: SID_A,
+        payload: { claude_session_id: 'csid-1' },
+      });
+      const r = await tryUpdateProjection(e, { rootPath });
+      assert.equal(r.ok, true, r.error);
+      // Both files should have appeared at the canonical names inside rootPath.
+      assert.ok(existsSync(join(rootPath, 'sessions-db-events.jsonl')));
+      assert.ok(existsSync(join(rootPath, 'sessions-db.json')));
+    } finally {
+      rmSync(rootPath, { recursive: true, force: true });
+    }
+  });
+});
+
 /**
  * Spawn a child Node that appends `count` events to `eventsPath`. Each
  * event payload includes `tag` (= childTag) and a unique sequence number so

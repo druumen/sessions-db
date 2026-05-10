@@ -2,6 +2,7 @@ export { initProjection } from "./init.mjs";
 export { watchProjection } from "./watch.mjs";
 export { loadProjection, rebuildProjection, recordSessionSeen, tryUpdateProjection, newEvent, appendEvent, readAllEvents, saveProjection, PATHS, MAX_EVENT_BYTES } from "./storage.mjs";
 export { setAlias, linkTask, unlinkTask, setParent, closeSession, runSweep } from "./operations.mjs";
+export { resolveStoragePaths, pathsFromRoot, STORAGE_FILENAMES, MAX_ASCEND_DEPTH } from "./paths.mjs";
 export { resolveIdentity, findByClaudeSessionId, findByTranscriptLineage, scanFingerprintCandidates, collectParentCandidates, capParentCandidates, classifyCorroborators, meetsThreshold, MAX_PARENT_CANDIDATES, STRONG_CORROBORATORS, WEAK_CORROBORATORS } from "./identity.mjs";
 export { computeSweepTransitions, computeEffectiveLastProgress } from "./sweep.mjs";
 export { sanitizeFirstPrompt, stripIdeWrappers, stripSystemReminders } from "./sanitize.mjs";

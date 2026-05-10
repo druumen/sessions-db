@@ -9,6 +9,7 @@
  *   stableId: string,
  *   alias?: string,
  *   clear?: boolean,
+ *   rootPath?: string,
  *   root?: string,
  *   paths?: object,
  * }} opts
@@ -18,6 +19,7 @@ export function setAlias(opts: {
     stableId: string;
     alias?: string;
     clear?: boolean;
+    rootPath?: string;
     root?: string;
     paths?: object;
 }): Promise<{
@@ -37,6 +39,7 @@ export function setAlias(opts: {
  *   stableId: string,
  *   tasks?: string[],
  *   projects?: string[],
+ *   rootPath?: string,
  *   root?: string,
  *   paths?: object,
  * }} opts
@@ -46,6 +49,7 @@ export function linkTask(opts: {
     stableId: string;
     tasks?: string[];
     projects?: string[];
+    rootPath?: string;
     root?: string;
     paths?: object;
 }): Promise<{
@@ -63,6 +67,7 @@ export function linkTask(opts: {
  *   stableId: string,
  *   tasks?: string[],
  *   projects?: string[],
+ *   rootPath?: string,
  *   root?: string,
  *   paths?: object,
  * }} opts
@@ -72,6 +77,7 @@ export function unlinkTask(opts: {
     stableId: string;
     tasks?: string[];
     projects?: string[];
+    rootPath?: string;
     root?: string;
     paths?: object;
 }): Promise<{
@@ -99,6 +105,7 @@ export function unlinkTask(opts: {
  *   childId: string,
  *   parentId?: string,
  *   clear?: boolean,
+ *   rootPath?: string,
  *   root?: string,
  *   paths?: object,
  * }} opts
@@ -108,6 +115,7 @@ export function setParent(opts: {
     childId: string;
     parentId?: string;
     clear?: boolean;
+    rootPath?: string;
     root?: string;
     paths?: object;
 }): Promise<{
@@ -128,6 +136,7 @@ export function setParent(opts: {
  *   stableId: string,
  *   outcome: string,
  *   reason?: string,
+ *   rootPath?: string,
  *   root?: string,
  *   paths?: object,
  * }} opts
@@ -137,6 +146,7 @@ export function closeSession(opts: {
     stableId: string;
     outcome: string;
     reason?: string;
+    rootPath?: string;
     root?: string;
     paths?: object;
 }): Promise<{
@@ -161,6 +171,7 @@ export function closeSession(opts: {
  * can fold all transitions into a single under-lock pass.
  *
  * @param {{
+ *   rootPath?: string,
  *   root?: string,
  *   paths?: object,
  *   idleThresholdDays?: number,
@@ -174,6 +185,7 @@ export function closeSession(opts: {
  * >}
  */
 export function runSweep(opts?: {
+    rootPath?: string;
     root?: string;
     paths?: object;
     idleThresholdDays?: number;

@@ -1,0 +1,7 @@
+# Day 4 path resolution default lands at `<cwd>/.dru-code/`. Running an
+# init-style script from inside the package dir would create one here;
+# don't track it.
+.dru-code/
+
+# Local-test artifacts (older path layout) — same reasoning.
+tickets/_logs/
