@@ -8,7 +8,7 @@ import {
   relTime,
   shouldUseColor,
   truncateStableId,
-} from '../format.mjs';
+} from '../../cli/format.mjs';
 
 // IDs are constructed so the first 22 chars (the truncation slice
 // `sess_XXXXXXXX-AAAA-7BBB`) differ. This lets tree-rendering tests assert

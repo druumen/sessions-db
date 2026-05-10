@@ -5,8 +5,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import * as rebuildMod from '../rebuild.mjs';
-import { newEvent } from '../../storage.mjs';
+import * as rebuildMod from '../../cli/rebuild.mjs';
+import { newEvent } from '../../lib/storage.mjs';
 
 const SID_A = 'sess_aaaaaaaa-1111-7000-8000-000000000001';
 

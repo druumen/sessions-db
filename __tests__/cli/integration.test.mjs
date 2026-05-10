@@ -39,7 +39,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
-const CLI = join(HERE, '..', '..', '..', '..', 'sessions-db.mjs');
+const CLI = join(HERE, '..', '..', 'cli', 'sessions-db.mjs');
 
 const SID_A = 'sess_aaaaaaaa-1111-7000-8000-000000000001';
 const SID_B = 'sess_bbbbbbbb-2222-7000-8000-000000000002';

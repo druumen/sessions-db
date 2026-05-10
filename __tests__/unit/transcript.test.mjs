@@ -9,7 +9,7 @@ import {
   parseTranscriptFile,
   listTranscriptFiles,
   workspaceHashFromCwd,
-} from '../transcript.mjs';
+} from '../../lib/transcript.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(__dirname, 'fixtures');

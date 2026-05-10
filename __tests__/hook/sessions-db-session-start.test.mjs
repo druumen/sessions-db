@@ -22,8 +22,8 @@ const HERE = fileURLToPath(new URL('.', import.meta.url));
 // process so the test exercises the real top-level wrappers (hard timeout,
 // main().catch, kill switch) instead of importing the module and missing
 // those side-effects.
-const HOOK = join(HERE, '..', 'sessions-db-session-start.mjs');
-const HOOK_MAIN = join(HERE, '..', 'sessions-db-session-start-main.mjs');
+const HOOK = join(HERE, '..', '..', 'cli', 'sessions-db-session-start.mjs');
+const HOOK_MAIN = join(HERE, '..', '..', 'cli', 'sessions-db-session-start-main.mjs');
 
 function mkTmp(prefix = 'hook-test-') {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
@@ -987,7 +987,7 @@ describe('sessions-db-session-start.mjs (hook integration)', () => {
       writeFileSync(eventsPath,
         readFileSync(eventsPath, 'utf8') + JSON.stringify(syntheticEvent) + '\n');
       // Rebuild projection from events.jsonl so the second record materializes.
-      const { rebuildProjection } = await import('../../sessions-db/_lib/storage.mjs');
+      const { rebuildProjection } = await import('../../lib/storage.mjs');
       await rebuildProjection({ root: ws });
 
       // Now fire the third hook. Both aStableId AND syntheticStableId are

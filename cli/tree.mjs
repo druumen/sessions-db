@@ -12,7 +12,7 @@
  *   2 — argparse error (missing positional, etc.)
  */
 
-import { loadProjection } from '../storage.mjs';
+import { loadProjection } from '../lib/storage.mjs';
 import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
 import { formatJSON, formatTree, shouldUseColor } from './format.mjs';
 

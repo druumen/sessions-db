@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { searchSessions } from '../find.mjs';
+import { searchSessions } from '../../cli/find.mjs';
 
 const SID_A = 'sess_aaaaaaaa-1111-7000-8000-000000000001';
 const SID_B = 'sess_bbbbbbbb-2222-7000-8000-000000000002';
@@ -182,7 +182,7 @@ describe('find — searchSessions reads disk projection via loadProjection', () 
       );
       // Import here to keep the read-only pure test (above) decoupled from
       // file IO during the bulk of cases.
-      const { loadProjection } = await import('../../storage.mjs');
+      const { loadProjection } = await import('../../lib/storage.mjs');
       const loaded = await loadProjection({ root: dir });
       const r = searchSessions(loaded, { alias: 'live' });
       assert.equal(r.length, 1);

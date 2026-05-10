@@ -12,15 +12,15 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { loadProjection } from '../../storage.mjs';
+import { loadProjection } from '../../lib/storage.mjs';
 
 // Handler modules under test — we import their `run()` functions and drive
 // them via tmpdir-isolated --root. We capture stdout/stderr/exit by stubbing
 // `process` for the duration of each call.
-import * as aliasMod from '../alias.mjs';
-import * as linkMod from '../link.mjs';
-import * as linkParentMod from '../link-parent.mjs';
-import * as closeMod from '../close.mjs';
+import * as aliasMod from '../../cli/alias.mjs';
+import * as linkMod from '../../cli/link.mjs';
+import * as linkParentMod from '../../cli/link-parent.mjs';
+import * as closeMod from '../../cli/close.mjs';
 
 const SID_A = 'sess_aaaaaaaa-1111-7000-8000-000000000001';
 const SID_B = 'sess_bbbbbbbb-2222-7000-8000-000000000002';

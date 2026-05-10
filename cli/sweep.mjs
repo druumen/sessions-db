@@ -22,8 +22,8 @@
  * audit-trail row) and avoids partial-batch failure modes.
  */
 
-import { computeSweepTransitions } from '../sweep.mjs';
-import { loadProjection, newEvent, tryUpdateProjection } from '../storage.mjs';
+import { computeSweepTransitions } from '../lib/sweep.mjs';
+import { loadProjection, newEvent, tryUpdateProjection } from '../lib/storage.mjs';
 import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
 import { formatJSON } from './format.mjs';
 

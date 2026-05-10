@@ -46,12 +46,12 @@ import {
   listTranscriptFiles,
   parseTranscriptFile,
   workspaceHashFromCwd,
-} from '../sessions-db/_lib/transcript.mjs';
-import { sanitizeFirstPrompt } from '../sessions-db/_lib/sanitize.mjs';
+} from '../lib/transcript.mjs';
+import { sanitizeFirstPrompt } from '../lib/sanitize.mjs';
 import {
   recordSessionSeen,
-} from '../sessions-db/_lib/storage.mjs';
-import { gitContext } from './_lib/git-context.mjs';
+} from '../lib/storage.mjs';
+import { gitContext } from '../lib/git-context.mjs';
 
 // ---------------------------------------------------------------------------
 // Top-level safety wrapper. Any unhandled rejection in main() exits 0 silently

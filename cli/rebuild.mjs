@@ -15,7 +15,7 @@
  * line corruptions throw and exit 1.
  */
 
-import { rebuildProjection } from '../storage.mjs';
+import { rebuildProjection } from '../lib/storage.mjs';
 import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
 import { formatJSON } from './format.mjs';
 

@@ -8,10 +8,10 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-import { acquireLock } from '../lock.mjs';
+import { acquireLock } from '../../lib/lock.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
-const LOCK_MODULE = join(HERE, '..', 'lock.mjs');
+const LOCK_MODULE = join(HERE, '..', '..', 'lib', 'lock.mjs');
 
 function mkTmp() {
   return mkdtempSync(join(tmpdir(), 'sessions-db-lock-'));

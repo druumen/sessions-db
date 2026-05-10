@@ -19,7 +19,7 @@
  *   - --json: array of full session records
  */
 
-import { loadProjection } from '../storage.mjs';
+import { loadProjection } from '../lib/storage.mjs';
 import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
 import { formatJSON, formatSessionTable, shouldUseColor } from './format.mjs';
 

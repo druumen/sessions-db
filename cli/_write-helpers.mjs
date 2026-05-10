@@ -16,7 +16,7 @@
  * and post-write feedback messages.
  */
 
-import { loadProjection, newEvent, tryUpdateProjection } from '../storage.mjs';
+import { loadProjection, newEvent, tryUpdateProjection } from '../lib/storage.mjs';
 import { formatJSON } from './format.mjs';
 
 /**

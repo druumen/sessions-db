@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { acquireLock } from '../lock.mjs';
+import { acquireLock } from '../../lib/lock.mjs';
 import {
   MAX_EVENT_BYTES,
   appendEvent,
@@ -28,11 +28,11 @@ import {
   recordSessionSeen,
   saveProjection,
   tryUpdateProjection,
-} from '../storage.mjs';
-import { MAX_PARENT_CANDIDATES } from '../identity.mjs';
+} from '../../lib/storage.mjs';
+import { MAX_PARENT_CANDIDATES } from '../../lib/identity.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
-const STORAGE_MODULE = join(HERE, '..', 'storage.mjs');
+const STORAGE_MODULE = join(HERE, '..', '..', 'lib', 'storage.mjs');
 
 function mkTmp() {
   return mkdtempSync(join(tmpdir(), 'sessions-db-storage-'));

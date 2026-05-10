@@ -34,14 +34,14 @@
  */
 
 const COMMANDS = {
-  find: () => import('./sessions-db/_lib/cli/find.mjs'),
-  tree: () => import('./sessions-db/_lib/cli/tree.mjs'),
-  alias: () => import('./sessions-db/_lib/cli/alias.mjs'),
-  link: () => import('./sessions-db/_lib/cli/link.mjs'),
-  'link-parent': () => import('./sessions-db/_lib/cli/link-parent.mjs'),
-  close: () => import('./sessions-db/_lib/cli/close.mjs'),
-  rebuild: () => import('./sessions-db/_lib/cli/rebuild.mjs'),
-  sweep: () => import('./sessions-db/_lib/cli/sweep.mjs'),
+  find: () => import('./find.mjs'),
+  tree: () => import('./tree.mjs'),
+  alias: () => import('./alias.mjs'),
+  link: () => import('./link.mjs'),
+  'link-parent': () => import('./link-parent.mjs'),
+  close: () => import('./close.mjs'),
+  rebuild: () => import('./rebuild.mjs'),
+  sweep: () => import('./sweep.mjs'),
 };
 
 function printRootHelp() {

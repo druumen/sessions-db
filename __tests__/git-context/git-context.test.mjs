@@ -13,7 +13,7 @@ import {
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
-import { gitContext, runGit } from '../git-context.mjs';
+import { gitContext, runGit } from '../../lib/git-context.mjs';
 
 function mkTmp(prefix = 'git-context-') {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));

@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildTreeJSON } from '../tree.mjs';
+import { buildTreeJSON } from '../../cli/tree.mjs';
 
 const SID_A = 'sess_aaaaaaaa-1111-7000-8000-000000000001';
 const SID_B = 'sess_bbbbbbbb-2222-7000-8000-000000000002';

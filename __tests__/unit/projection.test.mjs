@@ -6,7 +6,7 @@ import {
   emptyProjection,
   emptySession,
   rebuildFromEvents,
-} from '../projection.mjs';
+} from '../../lib/projection.mjs';
 
 const TS_A = '2026-05-09T10:00:00.000Z';
 const TS_B = '2026-05-09T10:05:00.000Z';

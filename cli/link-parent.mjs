@@ -17,7 +17,7 @@
  * CLI). 50 is generous — real hub-spoke chains are 1-3 hops.
  */
 
-import { loadProjection } from '../storage.mjs';
+import { loadProjection } from '../lib/storage.mjs';
 import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
 import { commitEvent, loadAndVerify, renderDryRun, reportResult } from './_write-helpers.mjs';
 

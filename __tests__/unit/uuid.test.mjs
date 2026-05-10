@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { generateSessionId, isSessionId, extractTimestamp } from '../uuid.mjs';
+import { generateSessionId, isSessionId, extractTimestamp } from '../../lib/uuid.mjs';
 
 describe('uuid.mjs', () => {
   it('generateSessionId returns a `sess_` prefixed UUIDv7 string', () => {

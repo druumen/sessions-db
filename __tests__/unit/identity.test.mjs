@@ -13,8 +13,8 @@ import {
   meetsThreshold,
   resolveIdentity,
   scanFingerprintCandidates,
-} from '../identity.mjs';
-import { applyEvent, emptyProjection, emptySession } from '../projection.mjs';
+} from '../../lib/identity.mjs';
+import { applyEvent, emptyProjection, emptySession } from '../../lib/projection.mjs';
 
 const SID_A = 'sess_01970000-0000-7000-8000-00000000000a';
 const SID_B = 'sess_01970000-0000-7000-8000-00000000000b';

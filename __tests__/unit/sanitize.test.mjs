@@ -5,7 +5,7 @@ import {
   sanitizeFirstPrompt,
   stripIdeWrappers,
   stripSystemReminders,
-} from '../sanitize.mjs';
+} from '../../lib/sanitize.mjs';
 
 describe('sanitize.mjs', () => {
   describe('stripSystemReminders', () => {

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   computeEffectiveLastProgress,
   computeSweepTransitions,
-} from '../sweep.mjs';
+} from '../../lib/sweep.mjs';
 
 const SID_A = 'sess_aaaaaaaa-1111-7000-8000-000000000001';
 const SID_B = 'sess_bbbbbbbb-2222-7000-8000-000000000002';

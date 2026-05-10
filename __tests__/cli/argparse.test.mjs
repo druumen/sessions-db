@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ArgparseError, formatHelp, parseArgs } from '../argparse.mjs';
+import { ArgparseError, formatHelp, parseArgs } from '../../cli/argparse.mjs';
 
 describe('argparse.mjs', () => {
   describe('parseArgs — flags', () => {
