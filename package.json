@@ -39,6 +39,12 @@
     "developer-tools"
   ],
   "scripts": {
-    "test": "node --test '__tests__/**/*.test.mjs'"
+    "test": "node --test '__tests__/**/*.test.mjs'",
+    "build:types": "cd ../.. && tsc -p tsconfig.sessions-db.json",
+    "check:types-smoke": "cd ../.. && tsc --noEmit -p packages/sessions-db/__tests__/types-smoke/tsconfig.json",
+    "prepublishOnly": "npm run build:types"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
   }
 }

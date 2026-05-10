@@ -1,0 +1,27 @@
+{
+  // Cockpit-style smoke tsconfig.
+  //
+  // Drives `tsc --noEmit` against `cockpit-import.ts` so every exported
+  // type name in `types/index.d.ts` is exercised at compile time. If the
+  // public surface ever drops a name or breaks a shape, the smoke fails
+  // before publish.
+  //
+  // `paths` maps `@druumen/sessions-db` → the in-repo `types/index.d.ts`
+  // because we are not actually published to npm yet. Cockpit will see
+  // the same entry by virtue of `package.json` `"types"` once published.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@druumen/sessions-db": ["../../types/index.d.ts"]
+    }
+  },
+  "include": ["./cockpit-import.ts"]
+}
