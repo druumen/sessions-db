@@ -171,10 +171,39 @@ inner wrapper, the second pass catches it. Truncation is UTF-16
 codepoint-safe (200 codepoints, not 200 bytes) so multi-byte characters
 are not split mid-glyph.
 
-To disable preview storage entirely (planned for 0.2.0):
+### Privacy opt-out (available in 0.1.0)
 
-- Pass `opts.storeFirstPrompt: false` to the hook.
-- Or set `DRUUMEN_SESSIONS_DB_STORE_PREVIEW=0`.
+To disable preview storage entirely — useful for marketplace audits,
+shared-machine deployments, or any user who'd rather not persist the
+human-readable first prompt:
+
+**Library API:**
+
+```js
+import { recordSessionSeen } from '@druumen/sessions-db';
+
+await recordSessionSeen({
+  claudeSessionId,
+  // ...other opts...
+  storeFirstPrompt: false,   // payload.first_prompt_preview = null
+});
+```
+
+**Hook env var (Claude Code SessionStart):**
+
+```bash
+DRUUMEN_SESSIONS_DB_STORE_PREVIEW=0 \
+  claude code   # or whatever spawns the hook
+```
+
+`'0'` and `'false'` (case-insensitive) opt out; anything else (or unset)
+keeps the default. Default is `true` — backward compatible with the
+0.1.0-dev preview behavior.
+
+Fingerprints (`first_human_prompt_v1`, `lineage_prefix_v1`) and
+`transcript_file` metadata are intentionally **not** affected by this
+opt-out, so identity reconciliation (resume / fork detection) keeps
+working for opt-out users.
 
 ## Schema
 
@@ -210,10 +239,11 @@ Apache 2.0 — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
 ## Roadmap
 
 - **0.1.0** (current): Library + CLI + hook + 3-priority identity +
-  cross-platform (macOS / Linux verified in CI; Windows pending runner).
-- **0.2.0** (TBD): Privacy opt-out (`storeFirstPrompt: false`),
-  parent_candidate auto-promote heuristic, outcome auto-derive on
-  `/task-done` linkage.
+  cross-platform (macOS / Linux verified in CI; Windows pending runner) +
+  privacy opt-out (`storeFirstPrompt: false` /
+  `DRUUMEN_SESSIONS_DB_STORE_PREVIEW=0`).
+- **0.2.0** (TBD): parent_candidate auto-promote heuristic, outcome
+  auto-derive on `/task-done` linkage.
 - **0.3.0** (TBD): Multi-machine sync (schema_version=3 break,
   documented migration).
 - **0.4.0+** (TBD): Web UI / VS Code Sessions panel via

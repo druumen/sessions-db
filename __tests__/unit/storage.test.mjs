@@ -961,6 +961,180 @@ describe('storage.mjs', () => {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // Privacy opt-out (cockpit Setup Wizard alignment 2026-05-11): library API
+  // accepts `opts.storeFirstPrompt: boolean`. Default `true` preserves
+  // 0.1.0-dev behavior. When `false`, payload.first_prompt_preview is set to
+  // null on the persisted event — fingerprints + transcript_files meta stay
+  // intact so identity reconciliation continues to work.
+  // ---------------------------------------------------------------------------
+  describe('recordSessionSeen — storeFirstPrompt opt-out (privacy)', () => {
+    const CSID_PRIV = '33333333-3333-3333-3333-333333333333';
+
+    it('storeFirstPrompt: true → preview field persisted as caller supplied', async () => {
+      const dir = mkTmp();
+      try {
+        const paths = pathsFor(dir);
+        const r = await recordSessionSeen({
+          claudeSessionId: CSID_PRIV,
+          paths,
+          storeFirstPrompt: true,
+          payloadBuilder: (_id) => ({
+            claude_session_id: CSID_PRIV,
+            first_prompt_preview: 'hello mock prompt',
+            fingerprints: { first_human_prompt_v1: 'fp-mock', lineage_prefix_v1: 'ln-mock' },
+            transcript_file: { path: '/mock/t.jsonl', first_uuid: 'u1', last_uuid: 'u2' },
+          }),
+        });
+        assert.equal(r.ok, true);
+        const lines = readFileSync(paths.eventsJsonl, 'utf8').split('\n').filter(Boolean);
+        const event = JSON.parse(lines[0]);
+        assert.equal(event.payload.first_prompt_preview, 'hello mock prompt',
+          'storeFirstPrompt:true must keep the caller-supplied preview');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('storeFirstPrompt: false → preview field set to null on persisted payload', async () => {
+      const dir = mkTmp();
+      try {
+        const paths = pathsFor(dir);
+        const r = await recordSessionSeen({
+          claudeSessionId: CSID_PRIV,
+          paths,
+          storeFirstPrompt: false,
+          payloadBuilder: (_id) => ({
+            claude_session_id: CSID_PRIV,
+            // Caller still passes a preview (e.g. cockpit pre-computed one
+            // before learning the user opted out). Storage MUST strip it.
+            first_prompt_preview: 'this should not be persisted',
+            fingerprints: { first_human_prompt_v1: 'fp-mock', lineage_prefix_v1: 'ln-mock' },
+            transcript_file: { path: '/mock/t.jsonl', first_uuid: 'u1', last_uuid: 'u2' },
+          }),
+        });
+        assert.equal(r.ok, true);
+        const lines = readFileSync(paths.eventsJsonl, 'utf8').split('\n').filter(Boolean);
+        const event = JSON.parse(lines[0]);
+        assert.equal(event.payload.first_prompt_preview, null,
+          'storeFirstPrompt:false must replace the preview with null');
+        // Projection mirrors the strip — no leak via the cache either.
+        const proj = await loadProjection({ paths });
+        const session = proj.sessions[r.stableId];
+        assert.equal(session.first_prompt_preview, null,
+          'projection must mirror the null preview (no cache leak)');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('storeFirstPrompt unset (default) → preview kept (backward compat)', async () => {
+      const dir = mkTmp();
+      try {
+        const paths = pathsFor(dir);
+        const r = await recordSessionSeen({
+          claudeSessionId: CSID_PRIV,
+          paths,
+          // No storeFirstPrompt opt → must preserve current 0.1.0-dev behavior.
+          payloadBuilder: (_id) => ({
+            claude_session_id: CSID_PRIV,
+            first_prompt_preview: 'default-on preview',
+          }),
+        });
+        assert.equal(r.ok, true);
+        const lines = readFileSync(paths.eventsJsonl, 'utf8').split('\n').filter(Boolean);
+        const event = JSON.parse(lines[0]);
+        assert.equal(event.payload.first_prompt_preview, 'default-on preview',
+          'absent opt must default to true (backward compat)');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('storeFirstPrompt: false does NOT touch fingerprints or transcript_file', async () => {
+      // The whole point of this opt is "preview-only redaction" — identity
+      // reconciliation must keep working. Both fingerprint hashes and the
+      // transcript_file metadata stay on the persisted payload so resume +
+      // fingerprint matching continue across the opt boundary.
+      const dir = mkTmp();
+      try {
+        const paths = pathsFor(dir);
+        const fingerprints = {
+          first_human_prompt_v1: 'hash-deadbeef',
+          lineage_prefix_v1: 'hash-cafebabe',
+        };
+        const transcriptFile = {
+          path: '/mock/t.jsonl',
+          first_uuid: 'uuid-first',
+          last_uuid: 'uuid-tail',
+          size: 1234,
+          status: 'ok',
+        };
+        const r = await recordSessionSeen({
+          claudeSessionId: CSID_PRIV,
+          paths,
+          storeFirstPrompt: false,
+          fingerprints,
+          payloadBuilder: (_id) => ({
+            claude_session_id: CSID_PRIV,
+            first_prompt_preview: 'should-be-stripped',
+            fingerprints,
+            transcript_file: transcriptFile,
+          }),
+        });
+        assert.equal(r.ok, true);
+        const lines = readFileSync(paths.eventsJsonl, 'utf8').split('\n').filter(Boolean);
+        const event = JSON.parse(lines[0]);
+        assert.equal(event.payload.first_prompt_preview, null);
+        // Fingerprints + transcript_file untouched — identity still works.
+        assert.deepEqual(event.payload.fingerprints, fingerprints,
+          'storeFirstPrompt must NOT strip fingerprints (identity reconciliation depends on them)');
+        assert.deepEqual(event.payload.transcript_file, transcriptFile,
+          'storeFirstPrompt must NOT strip transcript_file meta (lineage matching depends on it)');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('storeFirstPrompt: false on a follow-up call still resolves identity via P1 (csid index)', async () => {
+      // First call mints with preview; second call (same csid) opts out and
+      // MUST still reuse the same stable_id via the claude_session_id index.
+      // Proves the opt is purely about persistence, not identity routing.
+      const dir = mkTmp();
+      try {
+        const paths = pathsFor(dir);
+        const r1 = await recordSessionSeen({
+          claudeSessionId: CSID_PRIV,
+          paths,
+          // Default storeFirstPrompt (true).
+          payloadBuilder: (_id) => ({
+            claude_session_id: CSID_PRIV,
+            first_prompt_preview: 'first call preview',
+          }),
+        });
+        assert.equal(r1.ok, true);
+        const r2 = await recordSessionSeen({
+          claudeSessionId: CSID_PRIV,
+          paths,
+          storeFirstPrompt: false,
+          payloadBuilder: (_id) => ({
+            claude_session_id: CSID_PRIV,
+            first_prompt_preview: 'second call preview (must be stripped)',
+          }),
+        });
+        assert.equal(r2.ok, true);
+        assert.equal(r2.stableId, r1.stableId,
+          'P1 csid-index reuse must work regardless of storeFirstPrompt');
+        const lines = readFileSync(paths.eventsJsonl, 'utf8').split('\n').filter(Boolean);
+        const evt2 = JSON.parse(lines[1]);
+        assert.equal(evt2.payload.first_prompt_preview, null,
+          'second event must persist null preview when opted out');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('saveProjection error path leaves no debris', () => {
     it('cleans up .tmp.<pid> file when fsync/rename fails', async () => {
       // We cannot easily induce a real fsync failure without mocking fs.
