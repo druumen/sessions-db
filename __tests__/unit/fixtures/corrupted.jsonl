@@ -1,0 +1,5 @@
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-05-09T00:00:00.000Z","sessionId":"00000000-0000-0000-0000-000000000003"}
+this line is not json at all
+{"parentUuid":null,"type":"user","uuid":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","timestamp":"2026-05-09T00:00:01.000Z","userType":"external","cwd":"/tmp/fixture-corrupted","sessionId":"00000000-0000-0000-0000-000000000003","gitBranch":"feat/fixture-corrupted","message":{"role":"user","content":"FIXTURE_PROMPT_AFTER_CORRUPT"}}
+{"truncated_record_no_closing_brace":
+{"parentUuid":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","type":"assistant","uuid":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","timestamp":"2026-05-09T00:00:02.000Z","userType":"external","cwd":"/tmp/fixture-corrupted","sessionId":"00000000-0000-0000-0000-000000000003","message":{"role":"assistant","content":[{"type":"text","text":"FIXTURE_REPLY"}]}}
