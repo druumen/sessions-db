@@ -1,1 +1,9 @@
-export {};
+export { initProjection } from "./init.mjs";
+export { watchProjection } from "./watch.mjs";
+export { loadProjection, rebuildProjection, recordSessionSeen, tryUpdateProjection, newEvent, appendEvent, readAllEvents, saveProjection, PATHS, MAX_EVENT_BYTES } from "./storage.mjs";
+export { setAlias, linkTask, unlinkTask, setParent, closeSession, runSweep } from "./operations.mjs";
+export { resolveIdentity, findByClaudeSessionId, findByTranscriptLineage, scanFingerprintCandidates, collectParentCandidates, capParentCandidates, classifyCorroborators, meetsThreshold, MAX_PARENT_CANDIDATES, STRONG_CORROBORATORS, WEAK_CORROBORATORS } from "./identity.mjs";
+export { computeSweepTransitions, computeEffectiveLastProgress } from "./sweep.mjs";
+export { sanitizeFirstPrompt, stripIdeWrappers, stripSystemReminders } from "./sanitize.mjs";
+export { generateSessionId, isSessionId, extractTimestamp } from "./uuid.mjs";
+export { applyEvent, emptyProjection, emptySession, rebuildFromEvents } from "./projection.mjs";

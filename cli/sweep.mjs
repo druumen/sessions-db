@@ -2,28 +2,16 @@
  * `sessions-db sweep` — compute and apply activity_state transitions
  * (active → idle → archived) by recency.
  *
- * Reads the projection cache, asks the pure `computeSweepTransitions` planner
- * which sessions need a state change, and writes one `sweep` event per
- * transition through the standard `tryUpdateProjection` lock-and-apply path.
- * Idempotent: re-running on the same projection (same `now`) yields zero
- * transitions.
+ * Day 3 refactor: the planning + commit loop lives in
+ * `lib/operations.runSweep`. This handler is a thin wrapper that handles
+ * argparse, output rendering (human / JSON / quiet), and exit code mapping.
  *
- * The sweep operator (cron, manual ops, post-task hook) does not need to know
- * which signals contributed to the recency calculation — that's encapsulated
- * in `computeEffectiveLastProgress`. Today: max of (last_progress_at,
- * transcript mtimes, hive_watcher_last_seen). Future signals just extend the
- * planner without changing the CLI surface.
- *
- * Locking: each transition acquires the projection lock independently via
- * `tryUpdateProjection`. For typical sweep volumes (single digits per run)
- * this is fine; if the workspace grows huge a future `--batch` mode can fold
- * all transitions into a single under-lock pass. P5 keeps it simple — one
- * lock per transition matches the existing event semantics (one event = one
- * audit-trail row) and avoids partial-batch failure modes.
+ * Threshold validation (positive numbers; archive >= idle) stays in the
+ * CLI as exit-2 argparse errors so the test suite can pin both message
+ * and code without a library prefix in the message.
  */
 
-import { computeSweepTransitions } from '../lib/sweep.mjs';
-import { loadProjection, newEvent, tryUpdateProjection } from '../lib/storage.mjs';
+import { runSweep } from '../lib/operations.mjs';
 import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
 import { formatJSON } from './format.mjs';
 
@@ -79,10 +67,12 @@ export async function run(argv) {
   const json = parsed.flags['--json'] === true;
   const quiet = parsed.flags['--quiet'] === true;
 
-  // Threshold flags must be a positive number when provided. parseArgs
-  // already rejected non-numeric values; we additionally reject 0 / negative
-  // so a typo like `--idle-threshold-days 0` does not silently disable the
-  // threshold (which would auto-archive every session).
+  // Argparse-class threshold validation. parseArgs already rejected
+  // non-numeric values; we additionally reject 0 / negative so a typo
+  // like `--idle-threshold-days 0` does not silently disable the
+  // threshold (which would auto-archive every session). These exit codes
+  // (2, "must be a positive number" / "must be >= --idle-threshold-days")
+  // are what the test suite pins against.
   const idleThresholdDays = parsed.flags['--idle-threshold-days'];
   if (idleThresholdDays !== undefined
       && (!Number.isFinite(idleThresholdDays) || idleThresholdDays <= 0)) {
@@ -108,17 +98,17 @@ export async function run(argv) {
     process.exit(2);
   }
 
-  // Load the current projection — sweep is read-mostly, the rare write side
-  // re-acquires the lock per transition via tryUpdateProjection.
-  const projection = await loadProjection(root ? { root } : {});
-
-  const transitions = computeSweepTransitions(projection, {
+  const opts = {
     idleThresholdDays,
     archiveThresholdDays,
-  });
+    dryRun,
+    ...(root ? { root } : {}),
+  };
+  const result = await runSweep(opts);
 
-  // Dry-run path — print and bail. We do not need the lock for any of this.
+  // Dry-run path — print plan and bail. ok is always true for dry-run.
   if (dryRun) {
+    const transitions = result.transitions || [];
     if (json) {
       process.stdout.write(formatJSON({
         ok: true,
@@ -143,53 +133,25 @@ export async function run(argv) {
     return;
   }
 
-  // Real sweep — write one event per transition. We accumulate failures so
-  // a single hung lock does not silently hide the others; the operator sees
-  // exactly which transitions landed and which did not.
-  const applied = [];
-  const failed = [];
-  for (const t of transitions) {
-    const event = newEvent({
-      op: 'sweep',
-      stable_id: t.stable_id,
-      payload: {
-        activity_state: t.to_state,
-        effective_last_progress: t.effective_last_progress,
-      },
-    });
-    const result = await tryUpdateProjection(event, root ? { root } : {});
-    if (result.ok) {
-      applied.push({ ...t, event_id: event.event_id });
-    } else {
-      failed.push({ ...t, error: result.error });
-    }
-  }
-
-  // Tally for the summary line. Accept both "to idle" and "to archived" as
-  // discrete buckets — operators care about how many sessions just rotated
-  // out of "active triage" (idle) vs out of the workspace entirely (archived).
-  const toIdle = applied.filter((a) => a.to_state === 'idle').length;
-  const toArchived = applied.filter((a) => a.to_state === 'archived').length;
+  const applied = result.applied || [];
+  const failed = result.failed || [];
+  const summary = result.summary || {
+    total: 0, applied: 0, failed: 0, to_idle: 0, to_archived: 0,
+  };
 
   if (json) {
     process.stdout.write(formatJSON({
       ok: failed.length === 0,
       applied,
       failed,
-      summary: {
-        total: transitions.length,
-        applied: applied.length,
-        failed: failed.length,
-        to_idle: toIdle,
-        to_archived: toArchived,
-      },
+      summary,
     }));
   } else if (!quiet) {
-    if (transitions.length === 0) {
+    if (summary.total === 0) {
       process.stdout.write('ok: sweep — no transitions needed\n');
     } else {
       process.stdout.write(
-        `ok: sweep — ${applied.length} of ${transitions.length} transition${transitions.length === 1 ? '' : 's'} applied (${toIdle} to idle, ${toArchived} to archived)\n`,
+        `ok: sweep — ${applied.length} of ${summary.total} transition${summary.total === 1 ? '' : 's'} applied (${summary.to_idle} to idle, ${summary.to_archived} to archived)\n`,
       );
       for (const a of applied) {
         process.stdout.write(

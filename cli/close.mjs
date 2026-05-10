@@ -1,19 +1,20 @@
 /**
  * `sessions-db close <stable_id> --outcome X [--reason "..."]` — mark a
- * session closed with a terminal outcome. Writes a `close` event whose
- * P1 reducer sets `outcome`, `closed_at = event.ts`, and `closed_reason`.
+ * session closed with a terminal outcome.
+ *
+ * Day 3 refactor: routes through `lib/operations.closeSession`. The CLI
+ * keeps the historical exit-2 path for missing / invalid `--outcome`
+ * (an argparse-class error) so the test suite can pin both the message
+ * and the code without depending on operations' return shape for those
+ * pre-call validations.
  *
  * Outcome enum is enforced (matches projection schema):
  *   open | done | blocked | abandoned | merged | superseded
- *
- * `open` is allowed via close so an operator can REOPEN a previously-closed
- * session (sets outcome back to open, clears closed_reason if --reason
- * "(reopened)" is passed). The reducer's closed_at always tracks the
- * latest close event's ts, which preserves the reopen history in the jsonl.
  */
 
+import { closeSession } from '../lib/operations.mjs';
 import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
-import { commitEvent, loadAndVerify, renderDryRun, reportResult } from './_write-helpers.mjs';
+import { renderDryRun, reportResult, reportStableIdNotFound } from './_write-helpers.mjs';
 
 const VALID_OUTCOMES = new Set(['open', 'done', 'blocked', 'abandoned', 'merged', 'superseded']);
 
@@ -70,6 +71,9 @@ export async function run(argv) {
   const json = parsed.flags['--json'] === true;
   const quiet = parsed.flags['--quiet'] === true;
 
+  // Argparse-class checks (exit 2). The library would also reject these,
+  // but routing through CLI keeps the historical message + exit code that
+  // tests pin against.
   if (!outcome) {
     process.stderr.write(`error: --outcome is required\n`);
     process.exit(2);
@@ -79,17 +83,30 @@ export async function run(argv) {
     process.exit(2);
   }
 
-  await loadAndVerify(stableId, root ? { root } : {});
-
-  const payload = { outcome };
-  if (reason !== undefined) payload.closed_reason = reason;
-
   if (dryRun) {
+    const payload = { outcome };
+    if (reason !== undefined) payload.closed_reason = reason;
     renderDryRun({ op: 'close', stableId, payload, json });
     return;
   }
 
-  const result = await commitEvent({ op: 'close', stableId, payload, root });
+  const opts = root ? { root } : {};
+  const result = await closeSession({
+    stableId,
+    outcome,
+    reason,
+    ...opts,
+  });
+
+  if (!result.ok && typeof result.error === 'string'
+      && result.error.startsWith('stable_id not found:')) {
+    if (!quiet) {
+      const code = reportStableIdNotFound(result.error);
+      process.exit(code);
+    }
+    process.exit(1);
+  }
+
   const extra = { outcome };
   if (reason !== undefined) extra.reason = reason;
   const code = reportResult({

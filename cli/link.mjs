@@ -3,19 +3,19 @@
  * task or project (additive). Pass `--remove` to dispatch a `session_unlink`
  * event that removes the named tasks / projects.
  *
- * P5 changes (compared to P4):
- *   - `--remove --task X` now ships: writes a `session_unlink` event whose
- *     P5 reducer filters tasks[]/projects[] in place (set-based, idempotent).
- *     The P4 fast-fail path (refusing --remove with exit 2 + "not implemented"
- *     message) was retired — earlier divergence-from-projection fix is no
- *     longer needed because the unlink reducer + event op now exist.
- *   - `--remove` with no `--task` / `--project` still rejects with exit 2 +
- *     "requires at least one --task or --project" so an operator running
- *     `link <id> --remove` (no targets) does not get a confusing no-op event.
+ * Day 3 refactor: routes through `lib/operations.linkTask` /
+ * `lib/operations.unlinkTask` — argparse + result-to-exit only.
+ *
+ * P5 (preserved from earlier phases):
+ *   - `--remove --task X` writes a `session_unlink` event whose reducer
+ *     filters tasks[]/projects[] in place (set-based, idempotent).
+ *   - `--remove` with no `--task` / `--project` rejects with exit 2 +
+ *     "requires at least one --task or --project".
  */
 
+import { linkTask, unlinkTask } from '../lib/operations.mjs';
 import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
-import { commitEvent, loadAndVerify, renderDryRun, reportResult } from './_write-helpers.mjs';
+import { renderDryRun, reportResult, reportStableIdNotFound } from './_write-helpers.mjs';
 
 const SPEC = {
   positional: [{ name: 'stable_id', required: true }],
@@ -91,21 +91,36 @@ export async function run(argv) {
     process.exit(2);
   }
 
-  await loadAndVerify(stableId, root ? { root } : {});
-
   // P5: --remove writes a session_unlink event (set-based filter). Otherwise
   // we keep the P1 session_link path (additive).
   const op = remove ? 'session_unlink' : 'session_link';
-  const payload = {};
-  if (tasks.length > 0) payload.tasks = tasks;
-  if (projects.length > 0) payload.projects = projects;
 
   if (dryRun) {
+    const payload = {};
+    if (tasks.length > 0) payload.tasks = tasks;
+    if (projects.length > 0) payload.projects = projects;
     renderDryRun({ op, stableId, payload, json });
     return;
   }
 
-  const result = await commitEvent({ op, stableId, payload, root });
+  const opts = root ? { root } : {};
+  const fn = remove ? unlinkTask : linkTask;
+  const result = await fn({
+    stableId,
+    tasks: tasks.length > 0 ? tasks : undefined,
+    projects: projects.length > 0 ? projects : undefined,
+    ...opts,
+  });
+
+  if (!result.ok && typeof result.error === 'string'
+      && result.error.startsWith('stable_id not found:')) {
+    if (!quiet) {
+      const code = reportStableIdNotFound(result.error);
+      process.exit(code);
+    }
+    process.exit(1);
+  }
+
   const extra = {};
   if (tasks.length > 0) extra.tasks = tasks;
   if (projects.length > 0) extra.projects = projects;

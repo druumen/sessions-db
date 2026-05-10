@@ -3,13 +3,16 @@
  * alias.
  * `sessions-db alias <stable_id> --clear` — remove the alias (sets to null).
  *
- * Writes an `alias_set` event. Existence-check is performed BEFORE the write
- * so a typo'd stable_id surfaces as a clean exit-1 message instead of a
- * synthesized empty session record.
+ * Day 3 refactor: this handler is a thin wrapper around
+ * `lib/operations.setAlias` — argparse + dry-run rendering + result-to-exit
+ * mapping only. Existence-check is performed by the operation BEFORE the
+ * write so a typo'd stable_id surfaces as a clean exit-1 message instead
+ * of a synthesized empty session record.
  */
 
+import { setAlias } from '../lib/operations.mjs';
 import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
-import { commitEvent, loadAndVerify, renderDryRun, reportResult } from './_write-helpers.mjs';
+import { renderDryRun, reportResult, reportStableIdNotFound } from './_write-helpers.mjs';
 
 const SPEC = {
   positional: [
@@ -66,7 +69,10 @@ export async function run(argv) {
   const quiet = parsed.flags['--quiet'] === true;
 
   // Mutually-exclusive intent check: must be EITHER alias positional OR
-  // --clear. Both or neither is an argparse-class error.
+  // --clear. Both or neither is an argparse-class error (exit 2). The
+  // operations layer also rejects this combination, but doing the check
+  // here keeps the error stream identical to the historical CLI behavior
+  // (no library prefix in the message).
   if (clear && aliasArg !== undefined) {
     process.stderr.write(`error: alias and --clear are mutually exclusive\n`);
     process.exit(2);
@@ -76,18 +82,31 @@ export async function run(argv) {
     process.exit(2);
   }
 
-  // Verify session exists. We could skip this for --dry-run but consistency
-  // with non-dry-run UX (same exit code on bad id) outweighs the speed.
-  await loadAndVerify(stableId, root ? { root } : {});
-
-  const payload = clear ? { alias: null } : { alias: aliasArg };
-
   if (dryRun) {
+    const payload = clear ? { alias: null } : { alias: aliasArg };
     renderDryRun({ op: 'alias_set', stableId, payload, json });
     return;
   }
 
-  const result = await commitEvent({ op: 'alias_set', stableId, payload, root });
+  const opts = root ? { root } : {};
+  const result = clear
+    ? await setAlias({ stableId, clear: true, ...opts })
+    : await setAlias({ stableId, alias: aliasArg, ...opts });
+
+  // Stable-id-not-found gets the historical "error: stable_id not found:
+  // <id>" phrasing (no `op failed for ...` prefix). Operations returns the
+  // bare phrase as `result.error`; we recognize it and bypass reportResult
+  // for that one case so muscle-memory regex `/stable_id not found/` keeps
+  // matching.
+  if (!result.ok && typeof result.error === 'string'
+      && result.error.startsWith('stable_id not found:')) {
+    if (!quiet) {
+      const code = reportStableIdNotFound(result.error);
+      process.exit(code);
+    }
+    process.exit(1);
+  }
+
   const code = reportResult({
     result, op: 'alias_set', stableId, json, quiet,
     extra: clear ? { cleared: true } : { alias: aliasArg },

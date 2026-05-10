@@ -3,25 +3,24 @@
  * parent relationship (sets `parent_session_id` on child).
  * `sessions-db link-parent <child> --remove` — clear parent (set null).
  *
- * Writes a `parent_set` event. Both child and parent must exist (when not
- * removing). We refuse anything that would create a cycle:
- *   - direct: child === parent (1-cycle)
+ * Day 3 refactor: all child / parent existence checks AND multi-hop cycle
+ * detection live in `lib/operations.setParent`. This handler is a thin
+ * wrapper that maps argv → operation call → exit code, so the cycle
+ * defense exists in exactly one place.
+ *
+ * Cycle defense semantics (preserved from earlier phases):
+ *   - direct: child === parent (1-cycle) — rejected
  *   - multi-hop: walk the proposed parent's ancestor chain (via the
  *     projection's parent_session_id pointers) and refuse if we ever
  *     encounter `child` — that would close the loop, e.g. A→B already
  *     exists and someone runs `link-parent B A` would form A→B→A.
- *
- * We bound the ancestor walk at MAX_PARENT_CHAIN_DEPTH because the
- * projection might already contain a stale cycle (rare; would require a
- * bypass of this guard, but we don't want a corrupt projection to hang the
- * CLI). 50 is generous — real hub-spoke chains are 1-3 hops.
+ *   - bound: MAX_PARENT_CHAIN_DEPTH = 50 in operations.mjs to defend
+ *     against a stale projection cycle.
  */
 
-import { loadProjection } from '../lib/storage.mjs';
+import { setParent } from '../lib/operations.mjs';
 import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
-import { commitEvent, loadAndVerify, renderDryRun, reportResult } from './_write-helpers.mjs';
-
-const MAX_PARENT_CHAIN_DEPTH = 50;
+import { renderDryRun, reportResult, reportStableIdNotFound } from './_write-helpers.mjs';
 
 const SPEC = {
   positional: [
@@ -86,44 +85,46 @@ export async function run(argv) {
     process.exit(2);
   }
   if (!remove && parent === child) {
-    // Self-cycle would render as "(circular reference)" and serve no purpose.
+    // Self-cycle would render as "(circular reference)" and serve no
+    // purpose. Operations.setParent rejects it too, but the historical
+    // CLI message is "cannot be the same stable_id" — preserve it.
     process.stderr.write(`error: parent and child cannot be the same stable_id\n`);
     process.exit(1);
   }
 
-  // Always verify child exists.
-  await loadAndVerify(child, root ? { root } : {});
-  // Verify parent exists too (when not removing).
-  if (!remove) {
-    await loadAndVerify(parent, root ? { root } : {});
-
-    // P4 round-1 review fix: walk the proposed parent's ancestor chain
-    // and refuse if we encounter `child` (would close a cycle of length
-    // > 1, e.g. existing A→B + proposed `link-parent B A` → A→B→A).
-    // The 1-cycle (parent === child) was already rejected above.
-    const projection = await loadProjection(root ? { root } : {});
-    let cursor = parent;
-    for (let depth = 0; depth < MAX_PARENT_CHAIN_DEPTH && cursor; depth++) {
-      if (cursor === child) {
-        process.stderr.write(
-          `error: link-parent would create a cycle: `
-          + `proposed parent ${parent} reaches child ${child} after ${depth} hop(s)\n`,
-        );
-        process.exit(1);
-      }
-      const ancestor = projection.sessions && projection.sessions[cursor];
-      cursor = ancestor && ancestor.parent_session_id ? ancestor.parent_session_id : null;
-    }
-  }
-
-  const payload = remove ? { parent_session_id: null } : { parent_session_id: parent };
-
   if (dryRun) {
+    const payload = remove ? { parent_session_id: null } : { parent_session_id: parent };
     renderDryRun({ op: 'parent_set', stableId: child, payload, json });
     return;
   }
 
-  const result = await commitEvent({ op: 'parent_set', stableId: child, payload, root });
+  const opts = root ? { root } : {};
+  const result = remove
+    ? await setParent({ childId: child, clear: true, ...opts })
+    : await setParent({ childId: child, parentId: parent, ...opts });
+
+  if (!result.ok && typeof result.error === 'string') {
+    if (result.error.startsWith('stable_id not found:')) {
+      if (!quiet) {
+        const code = reportStableIdNotFound(result.error);
+        process.exit(code);
+      }
+      process.exit(1);
+    }
+    if (result.error.startsWith('setParent: would create a cycle:')) {
+      if (!quiet) {
+        // Strip the `setParent: ` prefix to keep the historical CLI
+        // wording (`error: link-parent would create a cycle: ...`). The
+        // operation phrasing is `would create a cycle:` — match the test
+        // regex `/would create a cycle/` either way; we re-prefix so
+        // the operator-facing message names the CLI subcommand.
+        const tail = result.error.slice('setParent: '.length);
+        process.stderr.write(`error: link-parent ${tail}\n`);
+      }
+      process.exit(1);
+    }
+  }
+
   const code = reportResult({
     result, op: 'parent_set', stableId: child, json, quiet,
     extra: remove ? { cleared: true } : { parent: parent },

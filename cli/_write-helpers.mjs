@@ -1,45 +1,24 @@
 /**
  * Shared helpers for write subcommands (alias / link / link-parent / close).
  *
- * Why a shared module instead of inlining? Three behaviors are identical
- * across all four:
- *   1. Verify the target stable_id exists in the projection BEFORE writing
- *      anything (no "create-on-write" magic — the contract is that hooks
- *      mint stable_ids; CLI only mutates known sessions).
- *   2. Render the planned event under --dry-run and return without touching
- *      disk.
- *   3. Build the canonical event via newEvent and route it through
- *      tryUpdateProjection (which handles the lock + jsonl-then-projection
- *      ordering invariant from P1 storage).
+ * Day 3: the actual mutation logic lives in `lib/operations.mjs`. These
+ * helpers handle the CLI surface only:
+ *   - rendering planned events for `--dry-run`
+ *   - mapping the library result `{ ok, event_id?, error? }` into stdout /
+ *     stderr / exit code in three formats: human (default), `--json`,
+ *     `--quiet`.
  *
- * Centralizing keeps the four subcommand handlers focused on flag plumbing
- * and post-write feedback messages.
+ * Why keep the helpers? The five write handlers all share the same
+ * presentation logic — centralizing it keeps each handler focused on flag
+ * plumbing + the operations-call signature mapping.
+ *
+ * Note on output messages: the test suite regex-matches phrases like
+ * `ok: <op> written for <stable_id>` and `error: stable_id not found`. Any
+ * change to wording here MUST be paired with a sweep of __tests__/cli/*.
  */
 
-import { loadProjection, newEvent, tryUpdateProjection } from '../lib/storage.mjs';
+import { newEvent } from '../lib/storage.mjs';
 import { formatJSON } from './format.mjs';
-
-/**
- * Verify a stable_id exists in the projection. Returns the session record
- * on success; calls process.exit(1) with an error message on miss.
- *
- * The miss is a business error (1) not an argparse error (2) — the user
- * passed a syntactically-valid id that just doesn't exist; that's a runtime
- * lookup failure not a flag-parse failure.
- *
- * @param {string} stableId
- * @param {{ root?: string }} opts
- * @returns {Promise<{ projection: object, session: object }>}
- */
-export async function loadAndVerify(stableId, opts = {}) {
-  const projection = await loadProjection(opts);
-  const session = projection.sessions && projection.sessions[stableId];
-  if (!session) {
-    process.stderr.write(`error: stable_id not found: ${stableId}\n`);
-    process.exit(1);
-  }
-  return { projection, session };
-}
 
 /**
  * Render a planned event for --dry-run. Always returns the event so callers
@@ -63,23 +42,20 @@ export function renderDryRun({ op, stableId, payload, json = false }) {
 }
 
 /**
- * Build the event + route through tryUpdateProjection. Surfaces the result
- * (ok or error) and returns the event_id on success.
- *
- * @returns {Promise<{ ok: boolean, event_id?: string, error?: string }>}
- */
-export async function commitEvent({ op, stableId, payload, root }) {
-  const event = newEvent({ op, stable_id: stableId, payload });
-  const result = await tryUpdateProjection(event, root ? { root } : {});
-  if (!result.ok) {
-    return { ok: false, error: result.error };
-  }
-  return { ok: true, event_id: event.event_id };
-}
-
-/**
  * Standard success / failure feedback for write commands.
- * Returns the exit code the caller should hand to process.exit().
+ *
+ * Result shape comes straight from `lib/operations.mjs` —
+ * `{ ok, event_id?, error? }`. We render and return the exit code the caller
+ * should hand to process.exit().
+ *
+ * Exit code policy:
+ *   - 0 = success
+ *   - 1 = business error (stable_id not found, validation failure, lock
+ *     timeout, cycle detection — anything `operations.*` returned with
+ *     `{ ok: false }`)
+ *
+ * `--quiet` swallows stdout but preserves the exit code so cron / scripted
+ * usage stays observable via `$?`.
  */
 export function reportResult({ result, op, stableId, json, quiet, extra = {} }) {
   if (quiet) return result.ok ? 0 : 1;
@@ -101,4 +77,23 @@ export function reportResult({ result, op, stableId, json, quiet, extra = {} }) 
     process.stderr.write(`error: ${op} failed for ${stableId}: ${result.error}\n`);
   }
   return result.ok ? 0 : 1;
+}
+
+/**
+ * Special-case the "stable_id not found" error so the CLI prints the
+ * historical exact phrase the tests pin against:
+ *
+ *   error: stable_id not found: <id>
+ *
+ * The operations layer uses the same wording for that error, but it embeds
+ * it inside the call's `result.error`. When the wrapper detects this prefix
+ * it re-emits the bare phrase to stderr so the existing test regex
+ * `/stable_id not found/` and operator muscle memory keep working.
+ *
+ * Returns the exit code the handler should hand to process.exit() —
+ * typically 1 for a not-found, but the caller may pass `code` to override.
+ */
+export function reportStableIdNotFound(error, code = 1) {
+  process.stderr.write(`error: ${error}\n`);
+  return code;
 }
