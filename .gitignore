@@ -1,3 +1,17 @@
+# Node.js
+node_modules/
+npm-debug.log*
+.npm/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
 # Day 4 path resolution default lands at `<cwd>/.dru-code/`. Running an
 # init-style script from inside the package dir would create one here;
 # don't track it.

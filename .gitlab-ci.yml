@@ -1,0 +1,75 @@
+# @druumen/sessions-db CI/CD
+#
+# Standalone repo extracted from druumen monorepo 2026-05-12.
+# Canonical GitLab: gitlab.tinfant.org/druumen/sessions-db
+# Public mirror:    github.com/druumen/sessions-db (read-only, pushed by mirror-to-github job)
+
+stages:
+  - test
+  - deploy
+  - publish
+
+# -----------------------------------------------------------------------------
+# Test: Linux runner — Node 20, 436+ tests
+# -----------------------------------------------------------------------------
+test-linux:
+  stage: test
+  image: node:20-bookworm
+  script:
+    - npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+    - npm test
+  rules:
+    - if: $CI_MERGE_REQUEST_IID
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# -----------------------------------------------------------------------------
+# Mirror to GitHub: triggered on master push or tag push.
+#
+# Requires CI variable GITHUB_MIRROR_TOKEN (masked + protected):
+#   - Fine-grained PAT from cockpit user (90d expiry, rotate per RELEASING.md)
+#   - Resource owner: druumen GitHub org
+#   - Repository access: only druumen/sessions-db
+#   - Permissions: Contents R/W + Metadata R
+# -----------------------------------------------------------------------------
+mirror-to-github:
+  stage: deploy
+  image: alpine/git:latest
+  variables:
+    GIT_STRATEGY: clone
+    GIT_DEPTH: 0
+  script:
+    - |
+      if [ -z "${GITHUB_MIRROR_TOKEN}" ]; then
+        echo "ERROR: GITHUB_MIRROR_TOKEN not set. Cockpit user must add masked+protected CI variable."
+        echo "Spec: fine-grained PAT, druumen org, druumen/sessions-db only, Contents R/W + Metadata R, 90d expiry."
+        exit 1
+      fi
+    - git remote add github "https://x-access-token:${GITHUB_MIRROR_TOKEN}@github.com/druumen/sessions-db.git"
+    - git push --force github master:master
+    - git push --force --tags github
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master"
+      when: on_success
+    - if: $CI_COMMIT_TAG
+      when: on_success
+  needs:
+    - job: test-linux
+      artifacts: false
+
+# -----------------------------------------------------------------------------
+# Publish (Day 3+ adds OIDC trusted publishing + provenance: true).
+# Bootstrap path (v0.1.0 first publish) uses NPM_TOKEN_BOOTSTRAP one-time token.
+# -----------------------------------------------------------------------------
+publish-npm:
+  stage: publish
+  image: node:20-bookworm
+  environment:
+    name: npm-publish
+  script:
+    - echo "TODO Day 3 — npm publish via OIDC trusted publisher + provenance"
+    - exit 1
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+      when: manual
+      allow_failure: false

@@ -1,0 +1,32 @@
+name: Windows CI
+
+# Cross-platform regression guard for marketplace users running Windows.
+# Mirror only — canonical GitLab CI is gitlab.tinfant.org/druumen/sessions-db.
+# Runs against the GitHub mirror after each push to master / tag / PR / manual.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  test-windows:
+    name: Tests on windows-latest (Node 22)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run tests (Node 22 native glob)
+        run: node --test "__tests__/**/*.test.mjs"
+        shell: pwsh

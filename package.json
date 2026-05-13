@@ -29,9 +29,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@gitlab.tinfant.org:8922/druumen/cn/drummen.git"
+    "url": "git+ssh://git@gitlab.tinfant.org:8922/druumen/sessions-db.git"
   },
-  "homepage": "https://druumen.com",
+  "bugs": {
+    "email": "security@druumen.com"
+  },
+  "homepage": "https://github.com/druumen/sessions-db#readme",
   "keywords": [
     "claude-code",
     "session-tracking",
@@ -40,8 +43,8 @@
   ],
   "scripts": {
     "test": "find __tests__ -name '*.test.mjs' -type f -print0 | xargs -0 node --test",
-    "build:types": "cd ../.. && tsc -p tsconfig.sessions-db.json",
-    "check:types-smoke": "cd ../.. && tsc --noEmit -p packages/sessions-db/__tests__/types-smoke/tsconfig.json",
+    "build:types": "tsc -p tsconfig.json",
+    "check:types-smoke": "tsc --noEmit -p __tests__/types-smoke/tsconfig.json",
     "prepublishOnly": "npm run build:types"
   },
   "devDependencies": {
