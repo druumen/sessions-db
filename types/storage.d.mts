@@ -200,6 +200,13 @@ export function tryUpdateProjection(event: object, opts?: {
  * caller-supplied list (rare; mostly the projection's own derivation) is
  * preserved.
  *
+ * Privacy: pass `opts.storeFirstPrompt: false` to clear the
+ * `first_prompt_preview` field on the persisted payload (whatever the
+ * payloadBuilder returned is overwritten with `null`). Default `true`
+ * preserves the pre-0.1.0 behavior. Sanitization, fingerprints, and
+ * transcript_files meta are NOT affected — only the human-readable preview
+ * is stripped, so identity reconciliation still works for opt-out users.
+ *
  * @param {{
  *   claudeSessionId: string,
  *   payloadBuilder: (stableId: string, identityResolution?: object) => object,
@@ -210,6 +217,7 @@ export function tryUpdateProjection(event: object, opts?: {
  *   now?: number,
  *   timeWindowHours?: number,
  *   minCorroborators?: number,
+ *   storeFirstPrompt?: boolean,
  *   paths?: typeof PATHS,
  *   root?: string,
  *   lockTimeoutMs?: number,
@@ -231,6 +239,7 @@ export function recordSessionSeen(opts: {
     now?: number;
     timeWindowHours?: number;
     minCorroborators?: number;
+    storeFirstPrompt?: boolean;
     paths?: typeof PATHS;
     root?: string;
     lockTimeoutMs?: number;

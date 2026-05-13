@@ -57,10 +57,14 @@ dependencies.
   exposes a fresh inner wrapper) → UTF-16 codepoint truncation at 200
   chars (no mid-glyph splits).
 - Local-only storage: zero network egress; no telemetry.
-- Privacy opt-out via `storeFirstPrompt: false` is planned for 0.2.0.
-  Until then, operators that need preview-free storage can patch the
-  hook entry locally or set the future `DRUUMEN_SESSIONS_DB_STORE_PREVIEW=0`
-  env var (no-op in 0.1.x; reserved name).
+- Privacy opt-out: pass `opts.storeFirstPrompt: false` to
+  `recordSessionSeen`, or set env var
+  `DRUUMEN_SESSIONS_DB_STORE_PREVIEW=0` (or `=false`, case-insensitive)
+  to disable preview storage entirely. When opted out the hook still
+  computes fingerprints + transcript_files metadata, so identity
+  reconciliation (resume / fork detection) keeps working — only the
+  human-readable preview field is dropped. Default `true` (backward
+  compat with 0.1.0-dev preview behavior).
 
 ### Known limitations
 

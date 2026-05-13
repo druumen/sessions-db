@@ -1029,6 +1029,166 @@ describe('sessions-db-session-start.mjs (hook integration)', () => {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // Privacy opt-out (cockpit Setup Wizard alignment 2026-05-11): hook reads
+  // DRUUMEN_SESSIONS_DB_STORE_PREVIEW from env and forwards to
+  // recordSessionSeen as `storeFirstPrompt: boolean`. Default keeps the
+  // 0.1.0-dev preview behavior; '0' / 'false' (case-insensitive) opt out.
+  // -------------------------------------------------------------------------
+
+  it('privacy: DRUUMEN_SESSIONS_DB_STORE_PREVIEW=0 → events.jsonl payload first_prompt_preview === null', async () => {
+    const ws = makeFakeWorkspace({ prefix: 'hook-privacy-zero-' });
+    try {
+      const transcriptPath = makeFakeTranscript(ws, FAKE_SID);
+      const r = await runHook({
+        cwd: ws,
+        stdin: JSON.stringify({
+          session_id: FAKE_SID,
+          cwd: ws,
+          transcript_path: transcriptPath,
+        }),
+        env: {
+          HOME: ws,
+          DRUUMEN_SESSIONS_DB_STORE_PREVIEW: '0',
+        },
+      });
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+      assert.equal(r.stderr, '');
+
+      const eventsPath = join(ws, 'tickets', '_logs', 'sessions-db-events.jsonl');
+      const event = JSON.parse(
+        readFileSync(eventsPath, 'utf8').trim().split('\n')[0],
+      );
+      assert.equal(event.op, 'session_seen');
+      assert.equal(event.payload.first_prompt_preview, null,
+        'env=0 must clear first_prompt_preview');
+      // Fingerprints stay so identity reconciliation still works.
+      assert.ok(event.payload.fingerprints.first_human_prompt_v1,
+        'fingerprints must NOT be stripped (identity depends on them)');
+      // transcript_file metadata still attached (lineage matching needs it).
+      assert.ok(event.payload.transcript_file,
+        'transcript_file meta must NOT be stripped');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('privacy: DRUUMEN_SESSIONS_DB_STORE_PREVIEW=False (case-insensitive) → null preview', async () => {
+    const ws = makeFakeWorkspace({ prefix: 'hook-privacy-falseci-' });
+    try {
+      const transcriptPath = makeFakeTranscript(ws, FAKE_SID);
+      const r = await runHook({
+        cwd: ws,
+        stdin: JSON.stringify({
+          session_id: FAKE_SID,
+          cwd: ws,
+          transcript_path: transcriptPath,
+        }),
+        env: {
+          HOME: ws,
+          // Mixed-case "False" — cockpit's Setup Wizard might write either
+          // canonical 'false' or capitalized 'False' depending on serializer.
+          DRUUMEN_SESSIONS_DB_STORE_PREVIEW: 'False',
+        },
+      });
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+      const event = JSON.parse(readFileSync(
+        join(ws, 'tickets', '_logs', 'sessions-db-events.jsonl'),
+        'utf8',
+      ).trim().split('\n')[0]);
+      assert.equal(event.payload.first_prompt_preview, null,
+        'env=False (case-insensitive) must clear preview');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('privacy: DRUUMEN_SESSIONS_DB_STORE_PREVIEW unset → preview filled (default-on backward compat)', async () => {
+    const ws = makeFakeWorkspace({ prefix: 'hook-privacy-unset-' });
+    try {
+      const transcriptPath = makeFakeTranscript(ws, FAKE_SID);
+      const r = await runHook({
+        cwd: ws,
+        stdin: JSON.stringify({
+          session_id: FAKE_SID,
+          cwd: ws,
+          transcript_path: transcriptPath,
+        }),
+        // env intentionally OMITS DRUUMEN_SESSIONS_DB_STORE_PREVIEW —
+        // unset must preserve current 0.1.0-dev preview behavior.
+        env: { HOME: ws },
+      });
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+      const event = JSON.parse(readFileSync(
+        join(ws, 'tickets', '_logs', 'sessions-db-events.jsonl'),
+        'utf8',
+      ).trim().split('\n')[0]);
+      assert.equal(event.payload.first_prompt_preview, 'hello world from fixture',
+        'unset env must default-on (preview persisted) — backward compat');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('privacy: DRUUMEN_SESSIONS_DB_STORE_PREVIEW=1 → preview filled (explicit-on)', async () => {
+    const ws = makeFakeWorkspace({ prefix: 'hook-privacy-one-' });
+    try {
+      const transcriptPath = makeFakeTranscript(ws, FAKE_SID);
+      const r = await runHook({
+        cwd: ws,
+        stdin: JSON.stringify({
+          session_id: FAKE_SID,
+          cwd: ws,
+          transcript_path: transcriptPath,
+        }),
+        env: {
+          HOME: ws,
+          DRUUMEN_SESSIONS_DB_STORE_PREVIEW: '1',
+        },
+      });
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+      const event = JSON.parse(readFileSync(
+        join(ws, 'tickets', '_logs', 'sessions-db-events.jsonl'),
+        'utf8',
+      ).trim().split('\n')[0]);
+      assert.equal(event.payload.first_prompt_preview, 'hello world from fixture',
+        'env=1 must keep preview (only 0/false opt out)');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('privacy: DRUUMEN_SESSIONS_DB_STORE_PREVIEW=truthy → preview filled (only "0"/"false" disable)', async () => {
+    // Asymmetric semantics test: any value other than the two canonical
+    // off-strings is treated as default-on. Protects against a typo opt-out
+    // accidentally being interpreted as something it isn't.
+    const ws = makeFakeWorkspace({ prefix: 'hook-privacy-truthy-' });
+    try {
+      const transcriptPath = makeFakeTranscript(ws, FAKE_SID);
+      const r = await runHook({
+        cwd: ws,
+        stdin: JSON.stringify({
+          session_id: FAKE_SID,
+          cwd: ws,
+          transcript_path: transcriptPath,
+        }),
+        env: {
+          HOME: ws,
+          DRUUMEN_SESSIONS_DB_STORE_PREVIEW: 'truthy',
+        },
+      });
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+      const event = JSON.parse(readFileSync(
+        join(ws, 'tickets', '_logs', 'sessions-db-events.jsonl'),
+        'utf8',
+      ).trim().split('\n')[0]);
+      assert.equal(event.payload.first_prompt_preview, 'hello world from fixture',
+        'unrecognized env value must default-on (only "0"/"false" disable)');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
   // MUST-PATCH 3 — kill switch must short-circuit BEFORE the dynamic
   // import fires, so a corrupted main module never gets a chance to throw.
   it('MUST-PATCH 3: kill switch exits 0 before importing main, even if main is unimportable', async () => {

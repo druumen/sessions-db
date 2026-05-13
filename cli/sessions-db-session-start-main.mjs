@@ -140,6 +140,23 @@ async function main() {
     ? sanitizeFirstPrompt(transcriptMeta.firstHumanPromptRaw)
     : null;
 
+  // (9b) Privacy opt-out gate. The env var DRUUMEN_SESSIONS_DB_STORE_PREVIEW
+  // mirrors the cockpit Setup Wizard's "Store first prompt preview" checkbox.
+  // Only literal '0' or 'false' (case-insensitive) disables preview storage;
+  // anything else (including unset) keeps the default behavior. Same
+  // semantics as the kill switch (`DRUUMEN_SESSIONS_DB_DISABLED=1`) — a
+  // single ENV-driven knob ops can flip without touching settings.json or
+  // the hook source.
+  //
+  // We translate the env to a boolean here and forward it as
+  // `opts.storeFirstPrompt` so the storage layer enforces the policy
+  // atomically inside the lock. The boolean shape matches the public
+  // library API exactly so cockpit can pass the same flag programmatically
+  // when it calls recordSessionSeen directly (no env-var scaffolding).
+  const storeFirstPrompt = isPreviewDisabled(
+    process.env.DRUUMEN_SESSIONS_DB_STORE_PREVIEW,
+  ) ? false : true;
+
   // (10) Hand off to the atomic recordSessionSeen transaction. It owns the
   // projection lock for the full resolve → build → append → apply → save
   // cycle, so concurrent hooks for the same claude_session_id cannot split
@@ -163,6 +180,7 @@ async function main() {
       gitContext: gitCtx,
       cwd,
       fingerprints,
+      storeFirstPrompt,
       payloadBuilder: (_stableId, _identityResolution) => buildSessionSeenPayload({
         claudeSessionId,
         gitCtx,
@@ -412,4 +430,25 @@ function pickString(v) {
 function looksLikeUuid(s) {
   return typeof s === 'string' &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+}
+
+/**
+ * Privacy opt-out predicate for `DRUUMEN_SESSIONS_DB_STORE_PREVIEW`.
+ *
+ * Returns true ONLY for the literal opt-out values `'0'` and `'false'`
+ * (case-insensitive, after trim). Everything else — unset, empty string,
+ * `'1'`, `'true'`, `'yes'`, garbage — keeps the default-on behavior.
+ *
+ * Why this asymmetric shape? The default is preview-stored (backward compat
+ * with 0.1.0-dev) and we want a typo in the env var to fail SAFE: an
+ * operator who intends to opt out but mistypes (e.g. sets `=False` and
+ * trusts case-insensitivity) gets opt-out, but a typo like `=fals` or
+ * `=disabled` keeps the default. Treating only the two canonical strings
+ * as off-signals makes the gate predictable; cockpit's Setup Wizard always
+ * writes one of the two canonical values when the user unticks the box.
+ */
+function isPreviewDisabled(envValue) {
+  if (typeof envValue !== 'string') return false;
+  const v = envValue.trim().toLowerCase();
+  return v === '0' || v === 'false';
 }
