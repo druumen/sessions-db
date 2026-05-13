@@ -50,7 +50,9 @@ mirror-to-github:
         exit 1
       fi
     - git remote add github "https://x-access-token:${GITHUB_MIRROR_TOKEN}@github.com/druumen/sessions-db.git"
-    - git push --force github master:master
+    # GitLab CI checks out as detached HEAD, so no local 'master' ref exists.
+    # Push HEAD:master to point GitHub's master at the same SHA we just tested.
+    - git push --force github HEAD:master
     - git push --force --tags github
   rules:
     - if: $CI_COMMIT_BRANCH == "master"
