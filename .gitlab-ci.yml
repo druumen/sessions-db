@@ -34,7 +34,11 @@ test-linux:
 # -----------------------------------------------------------------------------
 mirror-to-github:
   stage: deploy
-  image: alpine/git:latest
+  image:
+    name: alpine/git:latest
+    # alpine/git image has ENTRYPOINT git; GitLab runs scripts via sh -c.
+    # Override to empty entrypoint so the shell wrapper works.
+    entrypoint: [""]
   variables:
     GIT_STRATEGY: clone
     GIT_DEPTH: 0
