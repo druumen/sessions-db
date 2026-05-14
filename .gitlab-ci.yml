@@ -86,8 +86,20 @@ mirror-to-github:
       artifacts: false
 
 # -----------------------------------------------------------------------------
-# Publish (Day 3+ adds OIDC trusted publishing + provenance: true).
-# Bootstrap path (v0.1.0 first publish) uses NPM_TOKEN_BOOTSTRAP one-time token.
+# Publish (BOOTSTRAP path — one-time for v0.1.0 first publish).
+#
+# This job uses NPM_TOKEN_BOOTSTRAP, a one-time Granular Access Token
+# created on npm web with 48h expiry, masked + protected in GitLab CI
+# variables, environment-scoped to `npm-publish`. It is REVOKED
+# immediately after v0.1.0 lands on the registry.
+#
+# All releases after v0.1.0 publish via the GitHub Actions OIDC path
+# (.github/workflows/publish.yml), which emits npm provenance and
+# requires no long-lived secrets. See RELEASING.md for full procedure.
+#
+# Trigger: manual, only on annotated tags matching vX.Y.Z. The `manual`
+# rule prevents accidental publish on tag push; an operator must click
+# "Run" in the GitLab pipeline UI.
 # -----------------------------------------------------------------------------
 publish-npm:
   stage: publish
@@ -95,9 +107,142 @@ publish-npm:
   environment:
     name: npm-publish
   script:
-    - echo "TODO Day 3 — npm publish via OIDC trusted publisher + provenance"
-    - exit 1
+    # All steps run inside one bash block so we can install a trap that
+    # cleans up the .npmrc credentials file on ANY exit path (success,
+    # failure, killed runner). Without the trap, a `npm publish` failure
+    # would leave the token-bearing .npmrc in the workspace, potentially
+    # surfaced via post-job artifact collection.
+    - |
+      set -euo pipefail
+
+      # Restrict bootstrap path to v0.1.0 ONLY. From v0.1.1 onward,
+      # the OIDC path in .github/workflows/publish.yml is canonical.
+      # Defense in depth — also catches the case where NPM_TOKEN_BOOTSTRAP
+      # was forgotten in GitLab CI variables after the v0.1.0 revoke.
+      if [ "${CI_COMMIT_TAG:-}" != "v0.1.0" ]; then
+        echo "ERROR: bootstrap path is one-shot for v0.1.0."
+        echo "Tag ${CI_COMMIT_TAG:-<none>} should publish via GitHub Actions OIDC."
+        echo "If you really need to publish from GitLab CI, edit this rule explicitly."
+        exit 1
+      fi
+
+      if [ -z "${NPM_TOKEN_BOOTSTRAP:-}" ]; then
+        echo "ERROR: NPM_TOKEN_BOOTSTRAP not set."
+        echo ""
+        echo "This is the BOOTSTRAP path (one-time for v0.1.0)."
+        echo "After v0.1.0 lands on npm and trusted publisher is configured,"
+        echo "all subsequent releases use the OIDC path via GitHub Actions"
+        echo "(.github/workflows/publish.yml). See RELEASING.md."
+        echo ""
+        echo "If this is the v0.1.0 publish, the cockpit user must:"
+        echo "  1. Generate a Granular Access Token on npm web (48h expiry,"
+        echo "     @druumen scope, Read+Write)."
+        echo "  2. Add to GitLab CI variables as NPM_TOKEN_BOOTSTRAP,"
+        echo "     masked + protected, environment scope: npm-publish."
+        echo "  3. Re-run this job."
+        echo "  4. REVOKE the token immediately after publish lands."
+        exit 1
+      fi
+
+      # ---------------------------------------------------------------
+      # Pre-flight (1/4): package.json version must match tag.
+      # ---------------------------------------------------------------
+      PKG_VERSION=$(node -p "require('./package.json').version")
+      TAG_VERSION="${CI_COMMIT_TAG#v}"
+      if [ "${PKG_VERSION}" != "${TAG_VERSION}" ]; then
+        echo "ERROR: package.json version (${PKG_VERSION}) does not match tag (${TAG_VERSION})."
+        echo "Bump package.json and CHANGELOG.md before tagging. See RELEASING.md."
+        exit 1
+      fi
+
+      # ---------------------------------------------------------------
+      # Pre-flight (2/4): CHANGELOG.md must have a dated header for
+      # this version (not "TBD" or "Unreleased").
+      # ---------------------------------------------------------------
+      CHANGELOG_HEADER=$(grep -E "^## \[${PKG_VERSION}\]" CHANGELOG.md | head -1 || true)
+      if [ -z "${CHANGELOG_HEADER}" ]; then
+        echo "ERROR: no '## [${PKG_VERSION}]' header found in CHANGELOG.md."
+        exit 1
+      fi
+      if echo "${CHANGELOG_HEADER}" | grep -qiE "TBD|Unreleased"; then
+        echo "ERROR: CHANGELOG.md header for ${PKG_VERSION} is not dated:"
+        echo "  ${CHANGELOG_HEADER}"
+        echo "Replace 'TBD'/'Unreleased' with an ISO date (YYYY-MM-DD) before tagging."
+        exit 1
+      fi
+      if ! echo "${CHANGELOG_HEADER}" | grep -qE "[0-9]{4}-[0-9]{2}-[0-9]{2}"; then
+        echo "ERROR: CHANGELOG.md header for ${PKG_VERSION} has no ISO date:"
+        echo "  ${CHANGELOG_HEADER}"
+        exit 1
+      fi
+
+      npm ci --no-audit --no-fund
+      npm test
+
+      # ---------------------------------------------------------------
+      # Pre-flight (3/4): tarball file allowlist enforcement.
+      # Required files in tarball: LICENSE, NOTICE, README.md, CHANGELOG.md,
+      # package.json, plus lib/, cli/, types/ directories.
+      # ---------------------------------------------------------------
+      PACK_JSON=$(npm pack --json --dry-run)
+      FILES=$(echo "${PACK_JSON}" | node -e "
+        const data = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+        const files = (data[0] && data[0].files || []).map(f => f.path);
+        console.log(files.join('\n'));
+      ")
+      REQUIRED="LICENSE NOTICE README.md CHANGELOG.md package.json"
+      for f in $REQUIRED; do
+        if ! echo "${FILES}" | grep -qxE "${f}"; then
+          echo "ERROR: required file '${f}' missing from tarball."
+          echo "Tarball contents:"
+          echo "${FILES}" | sed 's/^/  /'
+          exit 1
+        fi
+      done
+      # Tests/fixtures/dev state must NOT be in tarball.
+      FORBIDDEN_PATTERNS='^__tests__/|^test/|^tests/|^\.gitlab-ci\.yml|^\.github/|^tickets/|^RELEASING\.md$|\.npmrc$'
+      if echo "${FILES}" | grep -qE "${FORBIDDEN_PATTERNS}"; then
+        echo "ERROR: tarball contains forbidden paths:"
+        echo "${FILES}" | grep -E "${FORBIDDEN_PATTERNS}" | sed 's/^/  /'
+        exit 1
+      fi
+
+      # ---------------------------------------------------------------
+      # Pre-flight (4/4): no uncommitted changes (CI normally clean,
+      # but defensive against runners with stale checkouts).
+      # ---------------------------------------------------------------
+      if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
+        echo "ERROR: working tree dirty:"
+        git status --short
+        exit 1
+      fi
+
+      # ---------------------------------------------------------------
+      # Publish — credentials lifecycle scoped to a temp NPM_CONFIG_USERCONFIG.
+      # Trap guarantees the file is removed even if `npm publish` is
+      # killed by signal or fails. The temp file is mode 0600 and
+      # outside the workspace (so a forgotten artifact upload would
+      # still not surface it).
+      # ---------------------------------------------------------------
+      NPMRC_TMP=$(mktemp -t npmrc.XXXXXX)
+      chmod 0600 "${NPMRC_TMP}"
+      trap 'rm -f "${NPMRC_TMP}"' EXIT INT TERM
+      echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN_BOOTSTRAP}" > "${NPMRC_TMP}"
+      export NPM_CONFIG_USERCONFIG="${NPMRC_TMP}"
+
+      npm publish --access public
+
+      echo ""
+      echo "Bootstrap publish complete. Next steps (cockpit user, manual):"
+      echo "  1. Verify: npm view @druumen/sessions-db@${TAG_VERSION}"
+      echo "  2. REVOKE NPM_TOKEN_BOOTSTRAP on npm web."
+      echo "  3. DELETE NPM_TOKEN_BOOTSTRAP CI variable in GitLab."
+      echo "  4. Configure trusted publisher on npm web (see RELEASING.md)."
+      echo "  5. From v0.1.1 onward, publishes go through GitHub Actions OIDC."
   rules:
+    # Match strict semver. The bootstrap path additionally enforces
+    # `CI_COMMIT_TAG == "v0.1.0"` inside the script so a stray manual
+    # click on a v0.1.1+ tag refuses fast.
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
       when: manual
       allow_failure: false
