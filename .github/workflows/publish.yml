@@ -35,6 +35,11 @@ jobs:
   publish:
     name: Publish to npm via OIDC
     runs-on: ubuntu-latest
+    # Skip v0.1.0 — that tag publishes via the GitLab CI bootstrap path
+    # (NPM_TOKEN_BOOTSTRAP), because npm web trusted publisher cannot
+    # be configured until the package exists on the registry. Without
+    # this skip, the v0.1.0 tag would produce a guaranteed red OIDC run.
+    if: github.ref_name != 'v0.1.0'
     # The `npm-publish` environment matches the trusted publisher config
     # on npm web. Renaming this environment requires updating npm web
     # too. See RELEASING.md rotation policy.
@@ -69,8 +74,48 @@ jobs:
           fi
           echo "OK: package.json ${PKG_VERSION} == tag ${TAG_VERSION}"
 
-      - name: Pack dry-run (sanity check tarball contents)
-        run: npm pack --dry-run
+      - name: Verify CHANGELOG has dated header
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          HEADER=$(grep -E "^## \[${PKG_VERSION}\]" CHANGELOG.md | head -1 || true)
+          if [ -z "${HEADER}" ]; then
+            echo "ERROR: no '## [${PKG_VERSION}]' header in CHANGELOG.md."
+            exit 1
+          fi
+          if echo "${HEADER}" | grep -qiE "TBD|Unreleased"; then
+            echo "ERROR: CHANGELOG header for ${PKG_VERSION} is not dated:"
+            echo "  ${HEADER}"
+            exit 1
+          fi
+          if ! echo "${HEADER}" | grep -qE "[0-9]{4}-[0-9]{2}-[0-9]{2}"; then
+            echo "ERROR: CHANGELOG header for ${PKG_VERSION} has no ISO date:"
+            echo "  ${HEADER}"
+            exit 1
+          fi
+          echo "OK: ${HEADER}"
+
+      - name: Pack dry-run + verify tarball allowlist
+        run: |
+          PACK_JSON=$(npm pack --json --dry-run)
+          FILES=$(echo "${PACK_JSON}" | node -e "
+            const data = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+            const files = (data[0] && data[0].files || []).map(f => f.path);
+            console.log(files.join('\n'));
+          ")
+          for f in LICENSE NOTICE README.md CHANGELOG.md package.json; do
+            if ! echo "${FILES}" | grep -qxE "${f}"; then
+              echo "ERROR: required file '${f}' missing from tarball."
+              echo "Tarball contents:"
+              echo "${FILES}" | sed 's/^/  /'
+              exit 1
+            fi
+          done
+          if echo "${FILES}" | grep -qE '^__tests__/|^test/|^tests/|^\.gitlab-ci\.yml|^\.github/|^tickets/|^RELEASING\.md$|\.npmrc$'; then
+            echo "ERROR: tarball contains forbidden paths:"
+            echo "${FILES}" | grep -E '^__tests__/|^test/|^tests/|^\.gitlab-ci\.yml|^\.github/|^tickets/|^RELEASING\.md$|\.npmrc$' | sed 's/^/  /'
+            exit 1
+          fi
+          echo "OK: tarball allowlist enforced."
 
       - name: Publish to npm with provenance
         run: npm publish --provenance --access public

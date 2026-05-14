@@ -59,6 +59,28 @@ switch to OIDC forever after.
 
 ### Operator (cockpit user) one-time steps
 
+0. **Release-prep MR** (before any tagging — fails fast if you skip this).
+
+   `package.json` ships on master as `0.0.1-dev` and `CHANGELOG.md`'s
+   `0.1.0` header reads `TBD (publish day)`. Both must be updated
+   **before** the tag is pushed, or the `publish-npm` job will refuse
+   to publish.
+
+   ```bash
+   cd /path/to/sessions-db
+   git checkout master
+   git pull --ff-only
+   git checkout -b release/v0.1.0
+   npm version 0.1.0 --no-git-tag-version
+   # Edit CHANGELOG.md: replace "## [0.1.0] — TBD (publish day)"
+   # with "## [0.1.0] — YYYY-MM-DD" (use today's date).
+   git commit -am "release: v0.1.0"
+   git push -u origin release/v0.1.0
+   glab mr create --target-branch master --title "release: v0.1.0" --remove-source-branch
+   ```
+
+   Wait for CI green + merge. Then continue to step 1.
+
 1. **Generate Granular Access Token on npm**
 
    - Login to <https://www.npmjs.com> as the publisher account.
@@ -222,6 +244,12 @@ This is the steady-state path. No long-lived secrets are stored anywhere.
 - **Rotation**: Set a calendar reminder 75 days after issue. Generate new
   token, update `GITHUB_MIRROR_TOKEN` GitLab CI variable, verify next
   master push triggers successful mirror.
+- **TODO** (follow-up enhancement, not blocking 0.1.0): add a
+  `schedule:`-triggered GitLab CI job that runs weekly, performs a
+  `git ls-remote` dry-run against the GitHub mirror using the token, and
+  fails fast if auth is rejected (expired / revoked / scope-changed).
+  Catches silent PAT expiry before the next master push (which might be
+  weeks away on slow days).
 
 ### npm trusted publisher (OIDC, no token)
 
@@ -246,9 +274,23 @@ If a release contains a security issue, secret leak, or critical bug:
 # Deprecate (keeps the tarball, marks it deprecated)
 npm deprecate @druumen/sessions-db@X.Y.Z "Security: see SECURITY.md / GHSA-..."
 
-# Unpublish (only allowed within 72 hours of publish, per npm policy)
+# Unpublish (subject to npm unpublish policy — see notes below)
 npm unpublish @druumen/sessions-db@X.Y.Z
 ```
+
+**npm unpublish policy** (see <https://docs.npmjs.com/policies/unpublish/>):
+
+- Allowed only within **72 hours** of publish.
+- **NOT allowed** if any other public-registry package depends on this
+  version. If even one downstream dependent exists, `npm unpublish`
+  refuses; you must use `npm deprecate` instead.
+- Once unpublished, the version string **can never be reused** — the
+  next release must bump to a higher version. Do not unpublish for
+  cosmetic reasons.
+
+When unpublish is not viable, the workflow is: `npm deprecate <bad>` +
+publish a fix release immediately (`X.Y.Z+1`) + file a security advisory
+on the GitHub mirror.
 
 Document the yank in `CHANGELOG.md` with a brief reason and link to the
 fix release. File a security advisory on the GitHub mirror if it was a
