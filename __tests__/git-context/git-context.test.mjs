@@ -11,31 +11,47 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, join, sep } from 'node:path';
 
 import { gitContext, runGit } from '../../lib/git-context.mjs';
 
 /**
- * Make a tmpdir + canonicalize to "git path form" so assertions against
- * `git rev-parse --show-toplevel` output (which is forward-slash + long-name
- * even on Windows) match the dir-we-created form exactly:
- *
- *   POSIX:
- *     mkdtempSync           → /tmp/git-context-abc
- *     realpathSync.native   → /tmp/git-context-abc
- *     (no separator swap)   → /tmp/git-context-abc          ✓ matches git
- *
- *   Windows:
- *     mkdtempSync           → C:\Users\RUNNER~1\AppData\Local\Temp\git-context-abc
- *     realpathSync.native   → C:\Users\runneradmin\AppData\Local\Temp\git-context-abc
- *                             (8.3 short name → long name, only the .native variant
- *                             does this; plain realpathSync preserves RUNNER~1)
- *     backslash → forward   → C:/Users/runneradmin/AppData/Local/Temp/git-context-abc  ✓ matches git
+ * Make a tmpdir + canonicalize 8.3 short names → long names on Windows.
+ * `realpathSync.native` (Node v9.2+) resolves both symlinks AND 8.3 short
+ * names (e.g. `RUNNER~1` → `runneradmin`); plain `realpathSync` does NOT
+ * resolve 8.3 on Windows. Use .native when available.
  */
 function mkTmp(prefix = 'git-context-') {
   const d = mkdtempSync(join(tmpdir(), prefix));
-  const resolved = realpathSync.native ? realpathSync.native(d) : realpathSync(d);
-  return process.platform === 'win32' ? resolved.replace(/\\/g, '/') : resolved;
+  return realpathSync.native ? realpathSync.native(d) : realpathSync(d);
+}
+
+/**
+ * Normalize a path for cross-platform comparison.
+ *
+ * Different observers disagree on path form on Windows:
+ *   - `mkdtempSync` returns native backslash + possibly 8.3 short name
+ *   - `realpathSync.native` returns native backslash + long name
+ *   - `git rev-parse --show-toplevel` returns... it depends. POSIX-style
+ *     forward slash in some Git for Windows builds; native backslash in
+ *     others (e.g. GitHub Actions windows-latest runners observed both
+ *     across CI runs). The variability is real and documented in the
+ *     Git for Windows issue tracker around `core.fscache` / `MSYS` env.
+ *
+ * Strategy: lowercase + replace all backslashes with forward slashes.
+ * After normalization, two paths pointing at the same long-name resource
+ * compare equal regardless of which observer produced them.
+ *
+ * NOT used as a security boundary — only for test assertions where we
+ * want "same filesystem location" not "same string".
+ */
+function normPath(p) {
+  if (typeof p !== 'string') return p;
+  return p.toLowerCase().replace(/\\/g, '/');
+}
+
+function assertPathEq(actual, expected, msg) {
+  assert.equal(normPath(actual), normPath(expected), msg);
 }
 
 /**
@@ -74,10 +90,18 @@ describe('git-context.mjs', () => {
         assert.equal(ctx.isInWorktree, false, 'main checkout should not be a linked worktree');
         assert.equal(ctx.branch, 'main');
         assert.equal(ctx.head, head.toLowerCase());
-        assert.equal(ctx.worktreePath, dir);
-        assert.equal(ctx.worktreeRealpath, dir);
-        assert.ok(ctx.gitCommonDir && ctx.gitCommonDir.endsWith('/.git'),
-          `gitCommonDir should resolve to .git, got ${ctx.gitCommonDir}`);
+        // Path observers can disagree on separator (Windows git for windows
+        // builds switch between forward/backslash output across versions/
+        // configs; mkdtempSync uses native backslash). normPath canonicalizes
+        // both sides for "same filesystem location" semantics.
+        assertPathEq(ctx.worktreePath, dir);
+        assertPathEq(ctx.worktreeRealpath, dir);
+        assert.ok(
+          ctx.gitCommonDir
+            && (ctx.gitCommonDir.endsWith('/.git')
+              || ctx.gitCommonDir.endsWith(`${sep}.git`)),
+          `gitCommonDir should resolve to .git, got ${ctx.gitCommonDir}`,
+        );
         assert.equal(ctx.registryName, null);
         assert.deepEqual(ctx.errors, []);
       } finally {

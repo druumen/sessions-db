@@ -67,6 +67,11 @@ test('types-smoke', async (t) => {
       encoding: 'utf8',
       // tsc can take a few seconds in cold-cache scenarios; give it 30s.
       timeout: 30_000,
+      // On Windows, `tsc.cmd` is a batch shim; Node's spawnSync invoking
+      // a .cmd directly fails with EINVAL. `shell: true` routes through
+      // cmd.exe so the batch script can execute its node-runner internals.
+      // POSIX is unaffected (its `tsc` is a normal executable script).
+      shell: process.platform === 'win32',
     });
     if (result.error) {
       assert.fail(`tsc spawn failed: ${result.error.message}`);
