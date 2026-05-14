@@ -50,12 +50,29 @@ mirror-to-github:
         exit 1
       fi
     - git remote add github "https://x-access-token:${GITHUB_MIRROR_TOKEN}@github.com/druumen/sessions-db.git"
-    # GitLab CI checks out as detached HEAD, so no local 'master' ref exists.
-    # Push HEAD:master to point GitHub's master at the same SHA we just tested.
-    - git push --force github HEAD:refs/heads/master
-    - git push --force --tags github
+    # GitLab CI checks out as detached HEAD; no local branch ref exists.
+    # Use $CI_COMMIT_REF_NAME to mirror the same branch name to GitHub
+    # (master → master, fix/foo → fix/foo, etc.). Tag pushes mirror the
+    # commit to master AND push tag refs.
+    - |
+      if [ -n "${CI_COMMIT_TAG}" ]; then
+        # Tag push: tag commit usually sits on master; mirror commit + tag.
+        git push --force github "HEAD:refs/heads/master"
+        git push --force --tags github
+      else
+        # Branch push (master or fix/feat/*): mirror to same-named branch.
+        git push --force github "HEAD:refs/heads/${CI_COMMIT_REF_NAME}"
+      fi
   rules:
     - if: $CI_COMMIT_BRANCH == "master"
+      when: on_success
+    # Fix / feat branches also mirror so GitHub Actions Windows CI can
+    # run against them. Master is canonical; these branch mirrors are
+    # ephemeral (deleted when branch is merged/removed on GitLab side
+    # via post-merge cleanup or manual `git push github :branch-name`).
+    - if: $CI_COMMIT_BRANCH =~ /^fix\//
+      when: on_success
+    - if: $CI_COMMIT_BRANCH =~ /^feat\//
       when: on_success
     - if: $CI_COMMIT_TAG
       when: on_success

@@ -6,7 +6,13 @@ name: Windows CI
 
 on:
   push:
-    branches: [master]
+    # Master is canonical; fix/feat branches are mirrored during active
+    # development (see GitLab .gitlab-ci.yml mirror-to-github job) so that
+    # Windows-specific fixes can be CI-verified before merging to master.
+    branches:
+      - master
+      - 'fix/**'
+      - 'feat/**'
   pull_request:
     branches: [master]
   workflow_dispatch:
