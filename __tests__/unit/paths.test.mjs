@@ -360,8 +360,16 @@ describe('resolveStoragePaths — ascend bound', () => {
     withEnv(undefined, () => {
       const r = resolveStoragePaths({ cwd: '/' });
       assert.equal(r.source, 'default');
-      // Default at cwd=/ is /.dru-code (an ugly but valid path).
-      assert.equal(r.root, join('/', '.dru-code'));
+      // Default at cwd=/ is <root>/.dru-code (an ugly but valid path).
+      // On POSIX:   '/' → '/.dru-code'
+      // On Windows: '/' resolves to the current drive root (e.g. 'D:\\') so
+      //             default becomes 'D:\\.dru-code'. Either way the path
+      //             must end in `<sep>.dru-code` — that's the cross-platform
+      //             invariant.
+      assert.ok(
+        r.root.endsWith(`${sep}.dru-code`),
+        `expected root to end with ${sep}.dru-code, got ${r.root}`,
+      );
     });
   });
 });

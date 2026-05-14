@@ -30,7 +30,12 @@ import assert from 'node:assert/strict';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(HERE, '..', '..');
-const TSC_BIN = resolve(PACKAGE_ROOT, 'node_modules', '.bin', 'tsc');
+// On Windows, npm-installed binaries are `.cmd` shim wrappers, not bare
+// executables. `node_modules/.bin/tsc` exists on POSIX; `node_modules/.bin/tsc.cmd`
+// exists on Windows. Pick the right one so spawnSync can find it.
+const TSC_BIN = process.platform === 'win32'
+  ? resolve(PACKAGE_ROOT, 'node_modules', '.bin', 'tsc.cmd')
+  : resolve(PACKAGE_ROOT, 'node_modules', '.bin', 'tsc');
 const TSCONFIG = resolve(HERE, 'tsconfig.json');
 const FIXTURE = resolve(HERE, 'cockpit-import.ts');
 

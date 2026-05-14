@@ -15,8 +15,27 @@ import { delimiter, join } from 'node:path';
 
 import { gitContext, runGit } from '../../lib/git-context.mjs';
 
+/**
+ * Make a tmpdir + canonicalize to "git path form" so assertions against
+ * `git rev-parse --show-toplevel` output (which is forward-slash + long-name
+ * even on Windows) match the dir-we-created form exactly:
+ *
+ *   POSIX:
+ *     mkdtempSync           → /tmp/git-context-abc
+ *     realpathSync.native   → /tmp/git-context-abc
+ *     (no separator swap)   → /tmp/git-context-abc          ✓ matches git
+ *
+ *   Windows:
+ *     mkdtempSync           → C:\Users\RUNNER~1\AppData\Local\Temp\git-context-abc
+ *     realpathSync.native   → C:\Users\runneradmin\AppData\Local\Temp\git-context-abc
+ *                             (8.3 short name → long name, only the .native variant
+ *                             does this; plain realpathSync preserves RUNNER~1)
+ *     backslash → forward   → C:/Users/runneradmin/AppData/Local/Temp/git-context-abc  ✓ matches git
+ */
 function mkTmp(prefix = 'git-context-') {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  const resolved = realpathSync.native ? realpathSync.native(d) : realpathSync(d);
+  return process.platform === 'win32' ? resolved.replace(/\\/g, '/') : resolved;
 }
 
 /**
@@ -211,7 +230,18 @@ describe('git-context.mjs', () => {
   // SIGTERM-equivalent exit signals (sleep, which runs until SIGKILL), to
   // verify our async runGit + per-call deadline truly bounds wall-clock time.
   describe('async runGit hard timeout (P2 fix)', () => {
-    it('runGit resolves with timedOut=true within deadline when child hangs', async () => {
+    it('runGit resolves with timedOut=true within deadline when child hangs', async (t) => {
+      // Windows skip: this test uses a `#!/bin/sh` shebang fake binary to
+      // simulate a hung git. Windows has no /bin/sh and chmodSync(0o755) is
+      // not executable semantics — the fake never runs; PATH falls through to
+      // the real git which answers fast → timedOut=false. The production
+      // logic (Promise.race vs deadline + child.kill) is platform-neutral
+      // Node API and is verified on POSIX CI. Replacing with a Windows-aware
+      // fake (git.cmd + ping -n 30 127.0.0.1) is post-0.1.0 hardening.
+      if (process.platform === 'win32') {
+        t.skip('Windows: shebang fake-git unsupported; deadline+kill contract verified on POSIX CI');
+        return;
+      }
       const fakeGitDir = mkTmp('git-context-fake-hang-');
       const gitPath = join(fakeGitDir, 'git');
       writeFileSync(gitPath, '#!/bin/sh\nexec sleep 30\n');

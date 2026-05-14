@@ -186,10 +186,21 @@ describe('initProjection', () => {
     }
   });
 
-  it('returns ok:false (no throw) on permission error', async () => {
+  it('returns ok:false (no throw) on permission error', async (t) => {
     // Skip on root user (where chmod is bypassed). CI typically runs as
     // non-root so this is exercised in normal pipelines.
     if (process.getuid && process.getuid() === 0) return;
+    // Skip on Windows: NTFS doesn't honor POSIX-style chmod 0o555 the way
+    // POSIX systems do — making a directory "read-only" via chmod still
+    // allows the owner to write/create files. To genuinely block writes
+    // on Windows you need ACL manipulation (icacls / SetSecurityInfo)
+    // which is out of scope for a unit test. The "ok:false on permission
+    // error" contract is exercised on Linux/macOS CI; production code
+    // path is platform-neutral (catches any fs error and returns ok:false).
+    if (process.platform === 'win32') {
+      t.skip('Windows NTFS does not honor POSIX chmod 0o555 — skipping; contract verified on POSIX CI');
+      return;
+    }
     const root = mkTmp();
     try {
       // Make the storage dir itself (which IS rootPath under Day 4) read-only
