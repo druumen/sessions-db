@@ -16,7 +16,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { acquireLock } from '../../lib/lock.mjs';
 import {
@@ -32,7 +32,10 @@ import {
 import { MAX_PARENT_CANDIDATES } from '../../lib/identity.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
-const STORAGE_MODULE = join(HERE, '..', '..', 'lib', 'storage.mjs');
+// Spawned child processes use dynamic `import()`, which on Windows requires
+// a `file://` URL (absolute paths like `D:\...` produce
+// ERR_UNSUPPORTED_ESM_URL_SCHEME). `pathToFileURL().href` is cross-platform.
+const STORAGE_MODULE = pathToFileURL(join(HERE, '..', '..', 'lib', 'storage.mjs')).href;
 
 function mkTmp() {
   return mkdtempSync(join(tmpdir(), 'sessions-db-storage-'));

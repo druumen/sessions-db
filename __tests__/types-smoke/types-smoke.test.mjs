@@ -30,7 +30,12 @@ import assert from 'node:assert/strict';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(HERE, '..', '..');
-const TSC_BIN = resolve(PACKAGE_ROOT, 'node_modules', '.bin', 'tsc');
+// On Windows, npm-installed binaries are `.cmd` shim wrappers, not bare
+// executables. `node_modules/.bin/tsc` exists on POSIX; `node_modules/.bin/tsc.cmd`
+// exists on Windows. Pick the right one so spawnSync can find it.
+const TSC_BIN = process.platform === 'win32'
+  ? resolve(PACKAGE_ROOT, 'node_modules', '.bin', 'tsc.cmd')
+  : resolve(PACKAGE_ROOT, 'node_modules', '.bin', 'tsc');
 const TSCONFIG = resolve(HERE, 'tsconfig.json');
 const FIXTURE = resolve(HERE, 'cockpit-import.ts');
 
@@ -62,6 +67,11 @@ test('types-smoke', async (t) => {
       encoding: 'utf8',
       // tsc can take a few seconds in cold-cache scenarios; give it 30s.
       timeout: 30_000,
+      // On Windows, `tsc.cmd` is a batch shim; Node's spawnSync invoking
+      // a .cmd directly fails with EINVAL. `shell: true` routes through
+      // cmd.exe so the batch script can execute its node-runner internals.
+      // POSIX is unaffected (its `tsc` is a normal executable script).
+      shell: process.platform === 'win32',
     });
     if (result.error) {
       assert.fail(`tsc spawn failed: ${result.error.message}`);

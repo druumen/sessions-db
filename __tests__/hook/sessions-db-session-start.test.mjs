@@ -410,7 +410,19 @@ describe('sessions-db-session-start.mjs (hook integration)', () => {
   // even a permanently hung `git` binary cannot exceed our 2s budget. Old
   // spawnSync code blocked the event loop; the bootstrap setTimeout never
   // fired. New code uses spawn + Promise.race so the timer wins.
-  it('MUST-PATCH 1: hard timeout fires within 2s when git hangs forever', async () => {
+  it('MUST-PATCH 1: hard timeout fires within 2s when git hangs forever', async (t) => {
+    // Windows skip: `makeHungGitDir()` produces a #!/bin/sh shebang fake git
+    // binary which Windows can't execute (no /bin/sh; chmod 0o755 not
+    // executable semantics). On Windows the PATH-override fake never runs,
+    // PATH falls through to real git which answers fast (~100ms), hook
+    // exits early — never tests the 2s hard-timeout fire path. Production
+    // setTimeout(2000).unref() is platform-neutral Node API; contract
+    // verified on POSIX CI. Post-0.1.0 hardening: replace shebang fake with
+    // Windows-aware `git.cmd` doing `ping -n 30 127.0.0.1 > nul`.
+    if (process.platform === 'win32') {
+      t.skip('Windows: shebang fake-git unsupported; 2s hard timeout contract verified on POSIX CI');
+      return;
+    }
     const fakeGitDir = makeHungGitDir();
     const ws = makeFakeWorkspace({ prefix: 'hook-hung-git-', withGit: false });
     try {

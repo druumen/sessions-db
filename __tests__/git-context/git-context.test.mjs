@@ -11,12 +11,47 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, join, sep } from 'node:path';
 
 import { gitContext, runGit } from '../../lib/git-context.mjs';
 
+/**
+ * Make a tmpdir + canonicalize 8.3 short names → long names on Windows.
+ * `realpathSync.native` (Node v9.2+) resolves both symlinks AND 8.3 short
+ * names (e.g. `RUNNER~1` → `runneradmin`); plain `realpathSync` does NOT
+ * resolve 8.3 on Windows. Use .native when available.
+ */
 function mkTmp(prefix = 'git-context-') {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  return realpathSync.native ? realpathSync.native(d) : realpathSync(d);
+}
+
+/**
+ * Normalize a path for cross-platform comparison.
+ *
+ * Different observers disagree on path form on Windows:
+ *   - `mkdtempSync` returns native backslash + possibly 8.3 short name
+ *   - `realpathSync.native` returns native backslash + long name
+ *   - `git rev-parse --show-toplevel` returns... it depends. POSIX-style
+ *     forward slash in some Git for Windows builds; native backslash in
+ *     others (e.g. GitHub Actions windows-latest runners observed both
+ *     across CI runs). The variability is real and documented in the
+ *     Git for Windows issue tracker around `core.fscache` / `MSYS` env.
+ *
+ * Strategy: lowercase + replace all backslashes with forward slashes.
+ * After normalization, two paths pointing at the same long-name resource
+ * compare equal regardless of which observer produced them.
+ *
+ * NOT used as a security boundary — only for test assertions where we
+ * want "same filesystem location" not "same string".
+ */
+function normPath(p) {
+  if (typeof p !== 'string') return p;
+  return p.toLowerCase().replace(/\\/g, '/');
+}
+
+function assertPathEq(actual, expected, msg) {
+  assert.equal(normPath(actual), normPath(expected), msg);
 }
 
 /**
@@ -55,10 +90,18 @@ describe('git-context.mjs', () => {
         assert.equal(ctx.isInWorktree, false, 'main checkout should not be a linked worktree');
         assert.equal(ctx.branch, 'main');
         assert.equal(ctx.head, head.toLowerCase());
-        assert.equal(ctx.worktreePath, dir);
-        assert.equal(ctx.worktreeRealpath, dir);
-        assert.ok(ctx.gitCommonDir && ctx.gitCommonDir.endsWith('/.git'),
-          `gitCommonDir should resolve to .git, got ${ctx.gitCommonDir}`);
+        // Path observers can disagree on separator (Windows git for windows
+        // builds switch between forward/backslash output across versions/
+        // configs; mkdtempSync uses native backslash). normPath canonicalizes
+        // both sides for "same filesystem location" semantics.
+        assertPathEq(ctx.worktreePath, dir);
+        assertPathEq(ctx.worktreeRealpath, dir);
+        assert.ok(
+          ctx.gitCommonDir
+            && (ctx.gitCommonDir.endsWith('/.git')
+              || ctx.gitCommonDir.endsWith(`${sep}.git`)),
+          `gitCommonDir should resolve to .git, got ${ctx.gitCommonDir}`,
+        );
         assert.equal(ctx.registryName, null);
         assert.deepEqual(ctx.errors, []);
       } finally {
@@ -211,7 +254,18 @@ describe('git-context.mjs', () => {
   // SIGTERM-equivalent exit signals (sleep, which runs until SIGKILL), to
   // verify our async runGit + per-call deadline truly bounds wall-clock time.
   describe('async runGit hard timeout (P2 fix)', () => {
-    it('runGit resolves with timedOut=true within deadline when child hangs', async () => {
+    it('runGit resolves with timedOut=true within deadline when child hangs', async (t) => {
+      // Windows skip: this test uses a `#!/bin/sh` shebang fake binary to
+      // simulate a hung git. Windows has no /bin/sh and chmodSync(0o755) is
+      // not executable semantics — the fake never runs; PATH falls through to
+      // the real git which answers fast → timedOut=false. The production
+      // logic (Promise.race vs deadline + child.kill) is platform-neutral
+      // Node API and is verified on POSIX CI. Replacing with a Windows-aware
+      // fake (git.cmd + ping -n 30 127.0.0.1) is post-0.1.0 hardening.
+      if (process.platform === 'win32') {
+        t.skip('Windows: shebang fake-git unsupported; deadline+kill contract verified on POSIX CI');
+        return;
+      }
       const fakeGitDir = mkTmp('git-context-fake-hang-');
       const gitPath = join(fakeGitDir, 'git');
       writeFileSync(gitPath, '#!/bin/sh\nexec sleep 30\n');

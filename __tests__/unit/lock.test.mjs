@@ -6,12 +6,17 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { acquireLock } from '../../lib/lock.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
-const LOCK_MODULE = join(HERE, '..', '..', 'lib', 'lock.mjs');
+// Spawned child processes use dynamic `import()`, which on Windows requires
+// a `file://` URL (absolute paths like `D:\...` produce
+// ERR_UNSUPPORTED_ESM_URL_SCHEME). `pathToFileURL().href` is cross-platform:
+// on POSIX it produces `file:///path/...`, on Windows it produces
+// `file:///D:/...` — both valid ESM URLs.
+const LOCK_MODULE = pathToFileURL(join(HERE, '..', '..', 'lib', 'lock.mjs')).href;
 
 function mkTmp() {
   return mkdtempSync(join(tmpdir(), 'sessions-db-lock-'));
