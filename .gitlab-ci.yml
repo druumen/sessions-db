@@ -21,6 +21,11 @@ test-linux:
   rules:
     - if: $CI_MERGE_REQUEST_IID
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    # Also run on fix/* + feat/* branches so the mirror-to-github job
+    # (which depends on test-linux via needs:) can fire and feed branches
+    # to GitHub Actions Windows CI for Windows-fix iteration.
+    - if: $CI_COMMIT_BRANCH =~ /^fix\//
+    - if: $CI_COMMIT_BRANCH =~ /^feat\//
     - if: $CI_COMMIT_TAG
 
 # -----------------------------------------------------------------------------
