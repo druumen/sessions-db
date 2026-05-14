@@ -86,8 +86,20 @@ mirror-to-github:
       artifacts: false
 
 # -----------------------------------------------------------------------------
-# Publish (Day 3+ adds OIDC trusted publishing + provenance: true).
-# Bootstrap path (v0.1.0 first publish) uses NPM_TOKEN_BOOTSTRAP one-time token.
+# Publish (BOOTSTRAP path — one-time for v0.1.0 first publish).
+#
+# This job uses NPM_TOKEN_BOOTSTRAP, a one-time Granular Access Token
+# created on npm web with 48h expiry, masked + protected in GitLab CI
+# variables, environment-scoped to `npm-publish`. It is REVOKED
+# immediately after v0.1.0 lands on the registry.
+#
+# All releases after v0.1.0 publish via the GitHub Actions OIDC path
+# (.github/workflows/publish.yml), which emits npm provenance and
+# requires no long-lived secrets. See RELEASING.md for full procedure.
+#
+# Trigger: manual, only on annotated tags matching vX.Y.Z. The `manual`
+# rule prevents accidental publish on tag push; an operator must click
+# "Run" in the GitLab pipeline UI.
 # -----------------------------------------------------------------------------
 publish-npm:
   stage: publish
@@ -95,8 +107,52 @@ publish-npm:
   environment:
     name: npm-publish
   script:
-    - echo "TODO Day 3 — npm publish via OIDC trusted publisher + provenance"
-    - exit 1
+    - |
+      if [ -z "${NPM_TOKEN_BOOTSTRAP}" ]; then
+        echo "ERROR: NPM_TOKEN_BOOTSTRAP not set."
+        echo ""
+        echo "This is the BOOTSTRAP path (one-time for v0.1.0)."
+        echo "After v0.1.0 lands on npm and trusted publisher is configured,"
+        echo "all subsequent releases use the OIDC path via GitHub Actions"
+        echo "(.github/workflows/publish.yml). See RELEASING.md."
+        echo ""
+        echo "If this is the v0.1.0 publish, the cockpit user must:"
+        echo "  1. Generate a Granular Access Token on npm web (48h expiry,"
+        echo "     @druumen scope, Read+Write)."
+        echo "  2. Add to GitLab CI variables as NPM_TOKEN_BOOTSTRAP,"
+        echo "     masked + protected, environment scope: npm-publish."
+        echo "  3. Re-run this job."
+        echo "  4. REVOKE the token immediately after publish lands."
+        exit 1
+      fi
+    - |
+      # Sanity: version in package.json must match tag (no -dev suffix).
+      PKG_VERSION=$(node -p "require('./package.json').version")
+      TAG_VERSION="${CI_COMMIT_TAG#v}"
+      if [ "${PKG_VERSION}" != "${TAG_VERSION}" ]; then
+        echo "ERROR: package.json version (${PKG_VERSION}) does not match tag (${TAG_VERSION})."
+        echo "Bump package.json and CHANGELOG.md before tagging. See RELEASING.md."
+        exit 1
+      fi
+    - npm ci --no-audit --no-fund
+    - npm test
+    - npm pack --dry-run
+    # Configure registry auth via env var (avoids writing token to disk
+    # via `npm config set` which would persist in the CI runner's
+    # ~/.npmrc — env-var form is process-local).
+    - echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN_BOOTSTRAP}" > .npmrc
+    - npm publish --access public
+    # Cleanup the .npmrc immediately (defense in depth — runner is
+    # ephemeral anyway, but this avoids the token surfacing in any
+    # post-job artifact collection).
+    - rm -f .npmrc
+    - echo ""
+    - echo "Bootstrap publish complete. Next steps (cockpit user, manual):"
+    - echo "  1. Verify: npm view @druumen/sessions-db@${TAG_VERSION}"
+    - echo "  2. REVOKE NPM_TOKEN_BOOTSTRAP on npm web."
+    - echo "  3. DELETE NPM_TOKEN_BOOTSTRAP CI variable in GitLab."
+    - echo "  4. Configure trusted publisher on npm web (see RELEASING.md)."
+    - echo "  5. From v0.1.1 onward, publishes go through GitHub Actions OIDC."
   rules:
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
       when: manual

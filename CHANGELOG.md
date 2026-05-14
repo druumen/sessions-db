@@ -43,11 +43,13 @@ dependencies.
   plus auto-emitted `.d.mts` siblings via `tsc --emitDeclarationOnly`
   + JSDoc on the source `.mjs` files. Cockpit and other TS consumers
   can `import type { KnownSession, Projection } from '@druumen/sessions-db'`.
-- **Cross-platform**: macOS / Linux supported and exercised; Linux is
-  the CI gate (`sessions-db-test-linux`). Windows is supported in code
-  (paths use `node:path` join, no shell-out, no POSIX-only syscalls)
-  and will be CI-gated once a Windows runner is registered (see Known
-  Limitations).
+- **Cross-platform**: macOS / Linux / Windows all supported and
+  CI-gated. Linux runs on GitLab `test-linux` (Node 20). Windows runs
+  on GitHub Actions `windows-latest` (Node 22) on the public mirror
+  `github.com/druumen/sessions-db`; the mirror is pushed automatically
+  by the GitLab `mirror-to-github` job on every master / tag / fix-or-
+  feat-branch push, so Windows CI feedback round-trips in under 30
+  minutes during active iteration.
 
 ### Privacy
 
@@ -74,10 +76,30 @@ dependencies.
 - macOS `fs.watch` may emit duplicate events; the library debounces
   internally at 80 ms, so consumers see a single change event per
   logical mutation.
-- Windows runner not yet registered on tinfant.org GitLab; the Windows
-  job will be added with `allow_failure: true` during initial burn-in
-  once a runner is available. Code is path-portable and expected to
-  pass on first run, but the contract isn't gated by CI yet.
+- (none specific to platform support — see Cross-platform note above for
+  current CI coverage.)
+
+### Supply chain
+
+- **Releases are CI-published only**; no local `npm publish` from
+  maintainer laptops. See [`RELEASING.md`](RELEASING.md) for the full
+  procedure.
+- **v0.1.0 (bootstrap)** publishes from GitLab CI (`publish-npm` job)
+  using a one-time `NPM_TOKEN_BOOTSTRAP` Granular Access Token (48h
+  expiry, `@druumen` scope, masked + protected + environment-scoped
+  variable, revoked immediately after publish).
+- **v0.1.1 onwards** publish from GitHub Actions
+  (`.github/workflows/publish.yml`) via npm **OIDC trusted publishing**
+  — no long-lived secrets, short-lived OIDC tokens validated by npm
+  registry on each publish — and emit **npm provenance** attestations
+  (SLSA-style cryptographically signed build attestations). Consumers
+  can verify with `npm view @druumen/sessions-db --json | jq .dist.attestations`.
+- **Tarball `files` whitelist**: only `lib/`, `cli/`, `types/`,
+  `LICENSE`, `NOTICE`, `README.md`, `CHANGELOG.md`, `package.json` are
+  packed. Tests, fixtures, and dev-only state are excluded by an
+  explicit allowlist (not `.npmignore` blocklist).
+- **Account hardening**: maintainer npm account is 2FA-required for
+  both login and publish.
 
 ### Dependencies
 
@@ -160,3 +182,68 @@ contract.
   `initProjection` → `loadProjection` → `setAlias` → `setParent` →
   `closeSession` → `runSweep` flow as the published API surface.
 - 426 tests pass (Day 4 baseline, no regression).
+
+### Day 2.5 — 2026-05-12 (monorepo extraction)
+
+- Package history extracted from the Druumen monorepo
+  (`drummen.com_cn/packages/sessions-db/`) to a new standalone repo
+  `gitlab.tinfant.org/druumen/sessions-db` via `git-filter-repo` so
+  the public OSS dependency does not require exposing the private
+  monorepo. Apache 2.0 license. History preserved.
+- Monorepo MR !80 strips `packages/sessions-db/` in-tree and adds
+  sibling-path resolution to `scripts/sessions-db.mjs` +
+  `scripts/hooks/sessions-db-session-start.mjs` so production hooks
+  installed via `~/.claude/settings.json` continue to fire without
+  re-wiring (resolve to `../../sessions-db/cli/sessions-db.mjs`).
+- GitHub mirror `github.com/druumen/sessions-db` set up via GitLab CI
+  `mirror-to-github` job (image: `alpine/git`, fine-grained PAT,
+  master + tags + `fix/*` + `feat/*` branch mirroring for iteration).
+
+### Day 6 — 2026-05-14 (Windows CI)
+
+- GitHub Actions `windows-latest` workflow added (`Windows CI`).
+  First run exposed **12 Windows-specific failures** in test
+  scaffolding (4 git-context + 4 concurrency NTFS + 3 path
+  normalization + 1 init errno shape). Production library/hook code
+  was unchanged — 0 lines touched — confirming the production code
+  was already cross-platform-portable.
+- Test-only fixes:
+  - `pathToFileURL` for spawned-child `node --input-type=module` inline
+    imports (`lock.test.mjs`, `storage.test.mjs`) — Windows requires
+    `file://` URLs, not absolute paths.
+  - `realpathSync.native` for Windows 8.3 short-name resolution in
+    `mkTmp` helpers (`git-context.test.mjs`) — `RUNNER~1` collapses
+    to `runneradmin`.
+  - `normPath` / `assertPathEq` helper for case-insensitive
+    slash-normalized path comparison (`git-context.test.mjs`) —
+    Windows is case-preserving but case-insensitive at the API.
+  - `endsWith(sep + ".git")` (or `'/.git'`) instead of `endsWith('/.git')`
+    for git common-dir separator variance.
+  - Skip hard-timeout shebang tests on Windows (fake bash binary
+    won't execute under cmd.exe / pwsh).
+  - Skip POSIX `chmod 0o555` permission test on Windows (NTFS does
+    not honor POSIX mode bits — contract still verified on POSIX).
+  - `tsc.cmd` shim + `shell: true` for `spawnSync` in
+    `types-smoke.test.mjs` — npm installs the .cmd shim on Windows,
+    and spawnSync needs a shell to resolve it.
+- `paths.test.mjs`: relaxed exact-equality to `endsWith` for
+  `.dru-code` filesystem root ascend (Windows backslash separator).
+- `.gitlab-ci.yml` `test-linux` + `mirror-to-github` rules expanded
+  to `fix/*` + `feat/*` (so the mirror job fires for iteration
+  branches, enabling sub-30min Windows CI feedback loop).
+- `.github/workflows/sessions-db-windows.yml` push trigger expanded
+  to `master` + `fix/**` + `feat/**`.
+- 3 iteration rounds, all under 1 day. Final state: master `708a02e5`
+  green on both GitLab `test-linux` and GitHub Actions Windows CI.
+
+### Day 7 — 2026-05-14 (supply-chain controls)
+
+- `RELEASING.md`: operator playbook for publishing (bootstrap path +
+  OIDC path + rotation policy + emergency yank procedure).
+- `.gitlab-ci.yml` `publish-npm` job: bootstrap path for v0.1.0,
+  uses `NPM_TOKEN_BOOTSTRAP` masked + protected variable, version
+  sanity check against tag, manual-trigger gate, `.npmrc` cleanup.
+- `.github/workflows/publish.yml`: OIDC publish workflow for v0.1.1+
+  releases, uses `id-token: write` + `--provenance` flag for npm
+  attestations. Inactive until trusted publisher configured on npm
+  web (Bootstrap step 7).

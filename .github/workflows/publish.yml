@@ -1,0 +1,85 @@
+name: Publish to npm (OIDC)
+
+# Steady-state publish path for v0.1.1 onwards.
+#
+# Authenticates via OIDC trusted publishing (configured on npm web for
+# druumen/sessions-db → workflow filename `publish.yml` → environment
+# `npm-publish`). No long-lived NPM_TOKEN stored anywhere — npm registry
+# validates the short-lived OIDC token issued by GitHub Actions for this
+# specific workflow run.
+#
+# Emits npm provenance (SLSA-style cryptographically signed build
+# attestation) via `--provenance`.
+#
+# Trigger: tag push matching vX.Y.Z (strict semver, no pre-release).
+# The tag is mirrored from GitLab CI's `mirror-to-github` job (canonical
+# CI lives at gitlab.tinfant.org).
+#
+# This workflow is INACTIVE until cockpit user completes Bootstrap step 7
+# in RELEASING.md (configures trusted publisher on npm web). Until then,
+# the v0.1.0 bootstrap publish path runs from GitLab CI `publish-npm` job
+# using NPM_TOKEN_BOOTSTRAP.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  # OIDC token issuance + npm provenance attestation publishing.
+  id-token: write
+  # No write to repository contents needed; the workflow only reads + publishes.
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to npm via OIDC
+    runs-on: ubuntu-latest
+    # The `npm-publish` environment matches the trusted publisher config
+    # on npm web. Renaming this environment requires updating npm web
+    # too. See RELEASING.md rotation policy.
+    environment:
+      name: npm-publish
+      url: https://www.npmjs.com/package/@druumen/sessions-db
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run tests
+        run: npm test
+
+      - name: Verify version matches tag
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${PKG_VERSION}" != "${TAG_VERSION}" ]; then
+            echo "ERROR: package.json version (${PKG_VERSION}) does not match tag (${TAG_VERSION})."
+            echo "See RELEASING.md pre-flight checks."
+            exit 1
+          fi
+          echo "OK: package.json ${PKG_VERSION} == tag ${TAG_VERSION}"
+
+      - name: Pack dry-run (sanity check tarball contents)
+        run: npm pack --dry-run
+
+      - name: Publish to npm with provenance
+        run: npm publish --provenance --access public
+        # No NODE_AUTH_TOKEN env — OIDC handles auth via setup-node's
+        # registry-url config + npm CLI's built-in trusted publisher
+        # support (npm >= 9.5.0, included in Node 20).
+
+      - name: Print verification commands
+        run: |
+          echo "Published. Verify:"
+          echo "  npm view @druumen/sessions-db@${GITHUB_REF_NAME#v}"
+          echo "  npm view @druumen/sessions-db@${GITHUB_REF_NAME#v} --json | jq .dist.attestations"
