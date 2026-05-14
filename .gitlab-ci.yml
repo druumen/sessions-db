@@ -146,13 +146,14 @@ publish-npm:
     # ephemeral anyway, but this avoids the token surfacing in any
     # post-job artifact collection).
     - rm -f .npmrc
-    - echo ""
-    - echo "Bootstrap publish complete. Next steps (cockpit user, manual):"
-    - echo "  1. Verify: npm view @druumen/sessions-db@${TAG_VERSION}"
-    - echo "  2. REVOKE NPM_TOKEN_BOOTSTRAP on npm web."
-    - echo "  3. DELETE NPM_TOKEN_BOOTSTRAP CI variable in GitLab."
-    - echo "  4. Configure trusted publisher on npm web (see RELEASING.md)."
-    - echo "  5. From v0.1.1 onward, publishes go through GitHub Actions OIDC."
+    - |
+      echo ""
+      echo "Bootstrap publish complete. Next steps (cockpit user, manual):"
+      echo "  1. Verify: npm view @druumen/sessions-db@${TAG_VERSION}"
+      echo "  2. REVOKE NPM_TOKEN_BOOTSTRAP on npm web."
+      echo "  3. DELETE NPM_TOKEN_BOOTSTRAP CI variable in GitLab."
+      echo "  4. Configure trusted publisher on npm web (see RELEASING.md)."
+      echo "  5. From v0.1.1 onward, publishes go through GitHub Actions OIDC."
   rules:
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
       when: manual
