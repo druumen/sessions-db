@@ -58,19 +58,29 @@ GitHub Actions trusted publisher (no NPM_TOKEN_BOOTSTRAP), with
 
 - **Regression guards** so Bug A / B / C class issues surface at
   publish time, not consumer integration time:
-  - `__tests__/cjs-smoke/cjs-smoke.test.mjs` — runtime CJS smoke.
-    Spawns a child Node process, calls `require('lib/index.cjs')`,
-    asserts all 35+ documented functions and 7+ constants are
-    callable / readable. Catches Bug A (require-resolution-broken)
-    and Bug C (CJS bundle missing/empty) at npm test time.
+  - `__tests__/pack-install-smoke/pack-install-smoke.test.mjs` —
+    end-to-end packaged-consumer smoke. `npm pack`s the source,
+    installs the tarball into a temp consumer dir, then exercises
+    the actual `package.json` exports map via 3 consumer styles:
+    (a) CJS `require('@druumen/sessions-db')`, (b) ESM
+    `import('@druumen/sessions-db')`, (c) TypeScript
+    `moduleResolution: "Node16"` with both type and value imports.
+    This is the canonical "consumer's POV" test — it would have
+    caught all 3 of 0.1.0's Bug A / B / C at publish time. The other
+    smokes complement it but bypass the exports map.
+  - `__tests__/cjs-smoke/cjs-smoke.test.mjs` — runtime CJS smoke
+    against `lib/index.cjs` directly. Asserts 35+ functions + 7+
+    constants are callable.
   - `__tests__/types-smoke/cockpit-import.ts` — added VALUE imports
-    block (was type-imports-only). Lists all 35+ functions and 7+
-    constants and `void`-references each one. Catches Bug B (type
-    alias instead of value re-export) at compile time.
+    block (was type-imports-only).
   - `__tests__/types-smoke/tsconfig.json` switched from
-    `moduleResolution: "Bundler"` to `"Node16"` — strictest mode,
-    matches what cockpit and other VS-Code-extension-class consumers
-    use. Would have caught Bug A class at publish time.
+    `moduleResolution: "Bundler"` to `"Node16"`.
+- **CI build-freshness gate** — both GitLab `test-linux` and GitHub
+  Actions `Windows CI` now run `npm run build` followed by
+  `git diff --exit-code lib/index.cjs types/`. If a contributor
+  edits `lib/*.mjs` (changing exported signatures) but forgets to
+  rerun the build before commit, CI fails fast at PR time instead
+  of shipping a stale bundle to npm.
 
 ### Build
 
@@ -137,7 +147,7 @@ dependencies.
   never walks to `/` on a slow networked mount.
 - **TypeScript types**: hand-curated `types/index.d.ts` re-export hub
   plus auto-emitted `.d.mts` siblings via `tsc --emitDeclarationOnly`
-  + JSDoc on the source `.mjs` files. Cockpit and other TS consumers
+  driven by JSDoc on the source `.mjs` files. Cockpit and other TS consumers
   can `import type { KnownSession, Projection } from '@druumen/sessions-db'`.
 - **Cross-platform**: macOS / Linux / Windows all supported and
   CI-gated. Linux runs on GitLab `test-linux` (Node 20). Windows runs
@@ -188,7 +198,7 @@ dependencies.
   The bootstrap path runs from GitLab CI which has no GitHub-Actions-
   style OIDC token issuer for npm; the npm registry only accepts
   provenance from a recognized OIDC publisher (currently GitHub Actions
-  + GitLab.com SaaS). `npm view @druumen/sessions-db@0.1.0 --json | jq
+  and GitLab.com SaaS). `npm view @druumen/sessions-db@0.1.0 --json | jq
   .dist.attestations` returns `{}`. This is a one-time gap covering
   only the bootstrap release; v0.1.1 onwards have full provenance.
 - **v0.1.1 onwards** publish from GitHub Actions

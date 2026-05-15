@@ -120,6 +120,26 @@ The hook is bootstrap-safe by design:
 - Errors are logged to stderr (visible in Claude Code's session log)
   but never surfaced as user-facing failures.
 
+#### Subpath imports `./cli` and `./hook` are ESM-only
+
+The `@druumen/sessions-db/cli` and `@druumen/sessions-db/hook` exports
+resolve to `.mjs` entry points and are intended to be **executed as
+processes** (via the `bin` field's shim, or invoked directly with
+`node <path>`). They are NOT intended for programmatic `require()` /
+`import` from a consumer's runtime code.
+
+If you need to run the CLI from your code, spawn it as a child process:
+
+```js
+// CJS or ESM consumer — spawn the CLI as a process
+import { spawnSync } from 'node:child_process';
+spawnSync('npx', ['sessions-db', 'find', '...'], { stdio: 'inherit' });
+```
+
+The main library entry (`@druumen/sessions-db`) IS dual-published as
+both CJS and ESM and works from either context. Only the bin-style
+subpaths are ESM-only.
+
 ## Path resolution
 
 When you don't pass an explicit `rootPath`, sessions-db walks a 5-priority

@@ -13,9 +13,14 @@
   },
   "exports": {
     ".": {
-      "types": "./types/index.d.ts",
-      "import": "./lib/index.mjs",
-      "require": "./lib/index.cjs",
+      "import": {
+        "types": "./types/index.d.ts",
+        "default": "./lib/index.mjs"
+      },
+      "require": {
+        "types": "./types/index.d.cts",
+        "default": "./lib/index.cjs"
+      },
       "default": "./lib/index.mjs"
     },
     "./cli": {

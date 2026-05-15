@@ -17,6 +17,18 @@ test-linux:
   image: node:20-bookworm
   script:
     - npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+    # Build freshness gate: run the build now, then diff against the
+    # committed artifacts. If lib/index.cjs or any types/*.d.mts file
+    # would change, the contributor forgot to run `npm run build`
+    # before commit. Catches stale-bundle bugs at PR time, not at
+    # publish time.
+    - npm run build
+    - |
+      if ! git diff --exit-code lib/index.cjs types/; then
+        echo "ERROR: committed build artifacts are stale relative to source."
+        echo "Run 'npm run build' locally and commit the result."
+        exit 1
+      fi
     - npm test
   rules:
     - if: $CI_MERGE_REQUEST_IID
