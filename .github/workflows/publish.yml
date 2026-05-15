@@ -57,6 +57,19 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
+      # Node 20 ships npm 10.8.x. npm OIDC trusted publisher support
+      # was added in npm 11.5.1 — earlier versions sign provenance
+      # successfully via sigstore but fail the npm registry token
+      # exchange with a 404 (which masks 401). v0.1.1 tag publish
+      # surfaced this: provenance attestation landed on Sigstore log
+      # 1547090299 / 1549427812 but registry PUT was rejected because
+      # the bundled npm couldn't speak OIDC to npm's auth endpoint.
+      # Upgrading npm globally on the runner picks up trusted publisher
+      # support without changing Node version (which is constrained by
+      # `engines` in package.json).
+      - name: Upgrade npm to OIDC-capable version (>=11.5.1)
+        run: npm install -g npm@latest
+
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 

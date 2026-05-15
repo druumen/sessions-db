@@ -5,6 +5,48 @@ All notable changes to `@druumen/sessions-db` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] — 2026-05-15
+
+CI-only patch. **Same source code as 0.1.1** — but 0.1.1 never actually
+landed on the npm registry; it stayed a tombstone tag because the
+GitHub Actions OIDC publish workflow used npm 10.8.2 (default for
+Node 20), which signs sigstore provenance fine but lacks the OIDC
+trusted-publisher token-exchange flow that npm registry requires
+(added in npm **11.5.1**). The publish PUT got 404 (npm-style auth
+masking) twice in a row.
+
+This release fixes the workflow + ships the same library code under
+0.1.2. Cockpit pinning `>=0.1.0 <0.2.0` will pick this up
+automatically; no manual install change needed.
+
+### Fixed (CI / supply chain)
+
+- `.github/workflows/publish.yml` now runs `npm install -g npm@latest`
+  before the publish step. Picks up OIDC trusted publisher support
+  (≥11.5.1) without changing the runner's Node version (constrained
+  by `engines: ">=18.0.0"` in package.json).
+
+### Tombstone tag note (0.1.1)
+
+- `v0.1.1` exists on GitLab + GitHub mirror as a permanent tag against
+  commit `4350814e` but is **NOT published to npm**. Two failed OIDC
+  publish attempts left two sigstore provenance records on the public
+  transparency log (`logIndex 1547090299` and `logIndex 1549427812`),
+  immutable forever — they prove the GitHub Actions runner attempted
+  to publish that tag. Consumers should ignore `v0.1.1` entirely.
+- The 0.1.1 CHANGELOG entry is preserved below as the full record of
+  the packaging fixes that **shipped under 0.1.2**.
+
+### `[ASSUMPTION]` lesson recorded
+
+- Per memory `feedback_tag_vendor_assumptions_in_plans` (saved
+  2026-05-15): the assumption "npm CLI shipped with Node 20 supports
+  OIDC trusted publisher" was written as fact in the original D15
+  publish.yml. Both Codex round-2 review and the cockpit owner's
+  bootstrap step 7 missed it because both audited "trusted publisher
+  is configured" without checking "is the runner's npm version
+  capable of using it." Real-world v0.1.1 publish surfaced the gap.
+
 ## [0.1.1] — 2026-05-15
 
 Packaging-only patch release. Fixes 3 independent bugs surfaced by the
