@@ -88,6 +88,13 @@ dependencies.
   using a one-time `NPM_TOKEN_BOOTSTRAP` Granular Access Token (48h
   expiry, `@druumen` scope, masked + protected + environment-scoped
   variable, revoked immediately after publish).
+- **v0.1.0 published WITHOUT provenance attestations** — intentional.
+  The bootstrap path runs from GitLab CI which has no GitHub-Actions-
+  style OIDC token issuer for npm; the npm registry only accepts
+  provenance from a recognized OIDC publisher (currently GitHub Actions
+  + GitLab.com SaaS). `npm view @druumen/sessions-db@0.1.0 --json | jq
+  .dist.attestations` returns `{}`. This is a one-time gap covering
+  only the bootstrap release; v0.1.1 onwards have full provenance.
 - **v0.1.1 onwards** publish from GitHub Actions
   (`.github/workflows/publish.yml`) via npm **OIDC trusted publishing**
   — no long-lived secrets, short-lived OIDC tokens validated by npm
@@ -247,3 +254,44 @@ contract.
   releases, uses `id-token: write` + `--provenance` flag for npm
   attestations. Inactive until trusted publisher configured on npm
   web (Bootstrap step 7).
+
+### Day 8 — 2026-05-15 (v0.1.0 published — 3 lessons learned)
+
+- **Published**: `@druumen/sessions-db@0.1.0` live on npm registry at
+  2026-05-15T08:22:56Z, Apache-2.0, `dist.shasum a70980a7…`. Pipeline
+  #429 (post-release-prep merge `645a8a4e`): `test-linux` 9.4s +
+  `mirror-to-github` 5.2s + `publish-npm` 12.6s. Trusted publisher
+  configured on npm web (org=druumen, repo=sessions-db, workflow=
+  publish.yml, env=npm-publish) immediately after bootstrap revoke,
+  arming OIDC path for 0.1.1+.
+
+- **Lesson 1 (Δ35 — protected `v*` tag gap)**: First v0.1.0 tag
+  pipeline `mirror-to-github` failed because `GITHUB_MIRROR_TOKEN`
+  (protected variable) wasn't accessible from `v*` tag pipelines —
+  only `master` + `fix/*` were in the protected refs list. Fixed by
+  adding `v*` to GitLab Protected Tags (Maintainers can create).
+  RELEASING.md pre-flight now explicitly lists the protected-refs
+  audit including `v*`.
+
+- **Lesson 2 (Δ36 — npm Granular "Bypass 2FA" checkbox)**: 5
+  consecutive `EOTP npm error code EOTP` failures during initial
+  publish attempts. Root cause discovered: npm removed Classic
+  Automation tokens in November 2025; only Granular Access Tokens
+  are now supported, and Granular tokens require an OTP at publish
+  time **even when the account is in `auth-only` 2FA mode**, unless
+  the explicit "Bypass two-factor authentication (2FA)" checkbox is
+  ticked at token creation. Token regenerated with the checkbox →
+  immediate publish success. RELEASING.md Step 1 now flags this as
+  a `MUST be checked` item with prominent ⚠️ marker.
+
+- **Lesson 3 (Δ37 — v0.1.0 has no provenance)**: Documented in the
+  Supply chain section above. Bootstrap path runs from GitLab CI
+  which lacks GitHub-Actions-style npm OIDC integration; v0.1.0 ships
+  without `dist.attestations`. Intentional and one-time — v0.1.1+ via
+  OIDC restores full provenance.
+
+- **Cockpit Phase 3 unblocked**: B1-B14 implementation begins
+  immediately on cockpit side. `npm install @druumen/sessions-db`
+  works for marketplace prep. Expect 1-2 minor patch releases
+  (0.1.1 / 0.1.2) shaking out integration corner cases — these will
+  be the first real exercise of the OIDC publish path.

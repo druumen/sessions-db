@@ -42,6 +42,16 @@ Pre-flight items that must be true before tagging:
   `lib/`, `cli/`, `types/`, `LICENSE`, `NOTICE`, `README.md`,
   `CHANGELOG.md`, `package.json`).
 - No uncommitted local changes (`git status` clean).
+- **Protected refs audit** — GitLab tinfant project must have all of:
+  - `master` branch (push + merge: Maintainers)
+  - `v*` tag (create: Maintainers) — **without this, the v* tag
+    pipeline cannot read protected variables like `GITHUB_MIRROR_TOKEN`,
+    and `mirror-to-github` fails on the publish pipeline.** Verify with:
+    ```bash
+    glab api projects/druumen%2Fsessions-db/protected_tags | jq '.[].name'
+    ```
+    Add via Settings → Repository → Protected tags → Pattern `v*` →
+    Allowed to create: Maintainers.
 
 ---
 
@@ -88,6 +98,15 @@ switch to OIDC forever after.
    - Configuration:
      - **Token name**: `sessions-db-bootstrap-0.1.0`
      - **Expiration**: **48 hours** (max needed; will be revoked sooner)
+     - **⚠️ Bypass two-factor authentication (2FA)**: **MUST be checked**.
+       npm removed Classic Automation tokens in November 2025; only
+       Granular Access Tokens are accepted. Granular tokens require an
+       OTP at publish time **even when the account is in `auth-only`
+       2FA mode**, unless this checkbox is explicitly opted in. Without
+       this opt-in, `npm publish` from CI fails with `EOTP` (we hit
+       this 5 times during 0.1.0 bootstrap before discovering the
+       checkbox).
+     - **Allowed IP ranges**: leave blank (CI runner IP is dynamic).
      - **Scopes**: `@druumen` only
      - **Packages**: `@druumen/sessions-db` only (or "no packages yet" if the
        UI requires existing packages — granular tokens allow this)
