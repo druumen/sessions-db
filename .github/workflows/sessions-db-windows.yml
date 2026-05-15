@@ -33,6 +33,16 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Build (types + CJS bundle) and verify artifacts are committed-fresh
+        # Bug-class regression guard: if a contributor edits lib/*.mjs
+        # (changing exports) but forgets to run `npm run build` before
+        # commit, the committed lib/index.cjs / types/*.d.mts go stale.
+        # Build now and `git diff --exit-code` to fail fast.
+        run: |
+          npm run build
+          git diff --exit-code lib/index.cjs types/
+        shell: bash
+
       - name: Run tests (Node 22 native glob)
         run: node --test "__tests__/**/*.test.mjs"
         shell: pwsh

@@ -53,6 +53,112 @@ import type {
 } from '@druumen/sessions-db';
 
 // ---------------------------------------------------------------------------
+// VALUE imports — Bug B regression guard.
+//
+// 0.1.0 shipped with `types/index.d.ts` containing only type aliases
+// (`export type LoadProjection = typeof import('./storage.d.mts').loadProjection`)
+// instead of value re-exports. Cockpit B1 hit `TS2305: Module
+// '@druumen/sessions-db' has no exported member 'loadProjection'` at
+// the very first integration. The smoke missed this because it only
+// imported types.
+//
+// 0.1.1 fix: types entry points to auto-emitted `types/index.d.mts`
+// which has proper `export { loadProjection } from './storage.mjs'`
+// value re-exports mirroring `lib/index.mjs`. The block below would
+// have caught the 0.1.0 bug at publish time.
+// ---------------------------------------------------------------------------
+
+import {
+  // Storage primitives
+  loadProjection,
+  rebuildProjection,
+  recordSessionSeen,
+  tryUpdateProjection,
+  newEvent,
+  appendEvent,
+  readAllEvents,
+  saveProjection,
+  // Operations (write surface)
+  setAlias,
+  linkTask,
+  unlinkTask,
+  setParent,
+  closeSession,
+  runSweep,
+  // Lifecycle
+  initProjection,
+  watchProjection,
+  // Path resolution
+  resolveStoragePaths,
+  pathsFromRoot,
+  // Identity
+  resolveIdentity,
+  findByClaudeSessionId,
+  findByTranscriptLineage,
+  // Sweep planner
+  computeSweepTransitions,
+  computeEffectiveLastProgress,
+  // Sanitize
+  sanitizeFirstPrompt,
+  // UUIDv7
+  generateSessionId,
+  isSessionId,
+  extractTimestamp,
+  // Projection reducers
+  applyEvent,
+  emptyProjection,
+  rebuildFromEvents,
+  // Constants
+  PATHS,
+  MAX_EVENT_BYTES,
+  STORAGE_FILENAMES,
+  MAX_ASCEND_DEPTH,
+  MAX_PARENT_CANDIDATES,
+  STRONG_CORROBORATORS,
+  WEAK_CORROBORATORS,
+} from '@druumen/sessions-db';
+
+// Reference each value once so tsc verifies the import is callable /
+// readable (catches the case where a name resolves to `unknown`).
+void loadProjection;
+void rebuildProjection;
+void recordSessionSeen;
+void tryUpdateProjection;
+void newEvent;
+void appendEvent;
+void readAllEvents;
+void saveProjection;
+void setAlias;
+void linkTask;
+void unlinkTask;
+void setParent;
+void closeSession;
+void runSweep;
+void initProjection;
+void watchProjection;
+void resolveStoragePaths;
+void pathsFromRoot;
+void resolveIdentity;
+void findByClaudeSessionId;
+void findByTranscriptLineage;
+void computeSweepTransitions;
+void computeEffectiveLastProgress;
+void sanitizeFirstPrompt;
+void generateSessionId;
+void isSessionId;
+void extractTimestamp;
+void applyEvent;
+void emptyProjection;
+void rebuildFromEvents;
+void PATHS;
+void MAX_EVENT_BYTES;
+void STORAGE_FILENAMES;
+void MAX_ASCEND_DEPTH;
+void MAX_PARENT_CANDIDATES;
+void STRONG_CORROBORATORS;
+void WEAK_CORROBORATORS;
+
+// ---------------------------------------------------------------------------
 // Branded-scalar smoke: assignments compile because each is a string alias.
 // ---------------------------------------------------------------------------
 
