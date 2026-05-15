@@ -2,6 +2,14 @@
 
 Cross-session traceability for [Claude Code](https://claude.com/claude-code).
 
+> **Repository note**: development happens at
+> `gitlab.tinfant.org/druumen/sessions-db` (private to tinfant org —
+> file MRs there). The `github.com/druumen/sessions-db` mirror is
+> public and is the source-of-truth for npm provenance attestations
+> + the consumer-facing "view source" link from
+> <https://www.npmjs.com/package/@druumen/sessions-db>. Both are kept
+> in sync via GitLab CI's `mirror-to-github` job.
+
 ## What it does
 
 Records every Claude Code session start (cwd, branch, transcript file,
