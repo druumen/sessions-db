@@ -2,17 +2,29 @@
   // Cockpit-style smoke tsconfig.
   //
   // Drives `tsc --noEmit` against `cockpit-import.ts` so every exported
-  // type name in `types/index.d.ts` is exercised at compile time. If the
-  // public surface ever drops a name or breaks a shape, the smoke fails
-  // before publish.
+  // type AND value name in `types/index.d.mts` is exercised at compile
+  // time. If the public surface ever drops a name or breaks a shape,
+  // the smoke fails before publish.
   //
-  // `paths` maps `@druumen/sessions-db` → the in-repo `types/index.d.ts`
-  // because we are not actually published to npm yet. Cockpit will see
-  // the same entry by virtue of `package.json` `"types"` once published.
+  // Two contracts are validated:
+  //   1. Type re-exports — `import type { KnownSession } from ...`
+  //   2. Value re-exports — `import { loadProjection } from ...`
+  //      (Bug B regression guard: 0.1.0 shipped with type-only re-
+  //      exports, breaking value imports under Node16 strict mode.)
+  //
+  // `moduleResolution: "Node16"` matches what cockpit and other
+  // VS-Code-extension-class consumers use. This is STRICTER than
+  // "Bundler" and is the resolution mode that surfaced Bug A in
+  // 0.1.0 (bare string-form exports entry without a types condition).
+  //
+  // `paths` maps `@druumen/sessions-db` → `../../types/index.d.mts`
+  // (auto-emitted by tsc from `lib/index.mjs`). The runtime CJS smoke
+  // (cjs-smoke.test.mjs) covers the package.json exports map at
+  // require() time, complementing this compile-time check.
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
+    "module": "Node16",
+    "moduleResolution": "Node16",
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,

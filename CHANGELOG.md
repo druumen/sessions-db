@@ -5,6 +5,102 @@ All notable changes to `@druumen/sessions-db` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-05-15
+
+Packaging-only patch release. Fixes 3 independent bugs surfaced by the
+first real consumer (Druumen Cockpit Phase 3 B1 integration) within
+hours of 0.1.0 publish. **Zero runtime/library code changes** — same
+public API surface, same test coverage. The fix is in how the package
+is shipped, not what it does.
+
+This is also the **first OIDC publish path test** — released via
+GitHub Actions trusted publisher (no NPM_TOKEN_BOOTSTRAP), with
+`--provenance` attestations. Consumers can now verify provenance via
+`npm view @druumen/sessions-db@0.1.1 --json | jq .dist.attestations`.
+
+### Fixed
+
+- **Bug A — Node16 module resolution ignores top-level `types`** when
+  `exports` map is present. 0.1.0 had bare-string-form
+  `"exports": { ".": "./lib/index.mjs" }` plus a top-level
+  `"types": "./types/index.d.ts"` — the top-level was silently
+  dropped under cockpit's `moduleResolution: "Node16"`. Symptom:
+  `TS7016: Could not find a declaration file for module '@druumen/sessions-db'`.
+  Fix: conditional exports map with explicit `types` + `import` +
+  `require` + `default` per entry. The top-level `types` is kept as
+  legacy fallback for `moduleResolution: "node"` (older TypeScript).
+
+- **Bug B — `types/index.d.ts` re-exported type aliases not values**.
+  0.1.0 had a hand-crafted `types/index.d.ts` with patterns like
+  `export type LoadProjection = typeof import('./storage.d.mts').loadProjection`
+  — these are TYPE ALIASES, not VALUE re-exports. Consumer could write
+  `import type { LoadProjection }` but not `import { loadProjection }`.
+  Symptom: `TS2305: Module '@druumen/sessions-db' has no exported
+  member 'loadProjection'`. Root cause: stale Day-2 artifact when
+  `lib/index.mjs` was a stub; never updated when Day 3 added real
+  value re-exports to `lib/index.mjs`. Fix: replace with a barrel
+  pattern that stitches `./index.d.mts` (auto-emitted value re-exports
+  mirroring lib/index.mjs) + `./types.d.mts` (auto-emitted type
+  declarations from lib/types.mjs `@typedef` block).
+
+- **Bug C — pure ESM rejected by Node16 CJS context**. 0.1.0 was pure
+  ESM (`"type": "module"` + only `.mjs` source). Cockpit (Node16 +
+  no `"type":"module"` → CJS context) hit `TS1479: ECMAScript module
+  cannot be imported with require`. Fix: dual CJS+ESM build via
+  esbuild — `lib/index.cjs` (62 KB bundle) is generated alongside
+  `lib/index.mjs` by `npm run build:cjs`. Exports map's `require`
+  condition routes CJS consumers to the bundle, `import` condition
+  keeps ESM consumers on the per-file structure. The bundle is
+  regenerated at `prepublishOnly` time so it always matches the
+  current `lib/index.mjs` exports.
+
+### Added
+
+- **Regression guards** so Bug A / B / C class issues surface at
+  publish time, not consumer integration time:
+  - `__tests__/cjs-smoke/cjs-smoke.test.mjs` — runtime CJS smoke.
+    Spawns a child Node process, calls `require('lib/index.cjs')`,
+    asserts all 35+ documented functions and 7+ constants are
+    callable / readable. Catches Bug A (require-resolution-broken)
+    and Bug C (CJS bundle missing/empty) at npm test time.
+  - `__tests__/types-smoke/cockpit-import.ts` — added VALUE imports
+    block (was type-imports-only). Lists all 35+ functions and 7+
+    constants and `void`-references each one. Catches Bug B (type
+    alias instead of value re-export) at compile time.
+  - `__tests__/types-smoke/tsconfig.json` switched from
+    `moduleResolution: "Bundler"` to `"Node16"` — strictest mode,
+    matches what cockpit and other VS-Code-extension-class consumers
+    use. Would have caught Bug A class at publish time.
+
+### Build
+
+- **`esbuild` ^0.25.x** added as a devDependency (single dep, no
+  runtime cost — bundle output has zero deps). `npm run build:cjs`
+  produces `lib/index.cjs` from `lib/index.mjs`. `npm run build`
+  runs both `build:types` (tsc) and `build:cjs` (esbuild).
+  `prepublishOnly` runs `npm run build` so the tarball always
+  contains the freshly-bundled CJS + freshly-emitted .d.mts.
+
+- `package.json` `"main"` switched to `./lib/index.cjs` (CJS entry
+  for legacy tooling). `"module"` field added pointing to
+  `./lib/index.mjs` (legacy bundler hint, e.g. webpack 4).
+
+### Tarball delta vs 0.1.0
+
+- 50 → 51 files (+1: `lib/index.cjs`)
+- 108.6 KB → 123.6 KB (+15 KB, all CJS bundle)
+- 371.2 KB → 432.8 KB unpacked (still well under target)
+
+### Codex round + lessons
+
+- Codex adversarial review applied (agentId: see commit message of
+  the round-2 fix commit).
+- Per `feedback_tag_vendor_assumptions_in_plans` saved 2026-05-15:
+  the assumption "ESM-only is fine for npm publishing" should have
+  been tagged `[ASSUMPTION]` in the original D-path plan, not
+  written as fact. Real-world consumer (cockpit Node16 CJS) surfaced
+  the gap. Documented for future plan-drafting discipline.
+
 ## [0.1.0] — 2026-05-15
 
 First public release. Extracted from the Druumen monorepo as a
