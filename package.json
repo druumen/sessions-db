@@ -1,6 +1,6 @@
 {
   "name": "@druumen/sessions-db",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Cross-session traceability for Claude Code — events.jsonl SSoT + JSON projection cache + 3-priority identity reconciliation",
   "license": "Apache-2.0",
   "type": "module",
@@ -47,7 +47,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@gitlab.tinfant.org:8922/druumen/sessions-db.git"
+    "url": "git+https://github.com/druumen/sessions-db.git"
   },
   "bugs": {
     "email": "security@druumen.com"

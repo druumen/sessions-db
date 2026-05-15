@@ -52,6 +52,21 @@ Pre-flight items that must be true before tagging:
     ```
     Add via Settings → Repository → Protected tags → Pattern `v*` →
     Allowed to create: Maintainers.
+- **OIDC publish prerequisites** (Path 2 / `v0.1.1+`):
+  - `package.json` `repository.url` MUST point to
+    `git+https://github.com/druumen/sessions-db.git` — npm registry
+    rejects (HTTP 422) any provenance-signed publish where the
+    package.json `repository.url` doesn't match the GitHub repo that
+    signed provenance. The GitLab tinfant URL is the dev SSoT but
+    NOT what npm sees. Verify with:
+    ```bash
+    node -p "require('./package.json').repository.url"
+    # → expect: git+https://github.com/druumen/sessions-db.git
+    ```
+  - GitHub Actions runner must use `npm >= 11.5.1` for OIDC trusted
+    publisher token-exchange (Node 20 ships 10.8.x). The
+    `publish.yml` workflow has an `npm install -g npm@latest` step
+    that handles this. Don't remove it.
 
 ---
 

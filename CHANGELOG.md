@@ -5,6 +5,63 @@ All notable changes to `@druumen/sessions-db` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] — 2026-05-15
+
+CI metadata patch. **Same source code as 0.1.1 / 0.1.2** — both prior
+versions stayed tombstone tags because separate npm-side gates
+rejected the publish. This release fixes the second one. Cockpit pin
+`>=0.1.0 <0.2.0` will pick up 0.1.3.
+
+### Fixed (CI / supply chain)
+
+- `package.json` `repository.url` switched from
+  `git+ssh://git@gitlab.tinfant.org:8922/druumen/sessions-db.git` to
+  `git+https://github.com/druumen/sessions-db.git`. Required by npm
+  registry's provenance verification: when a package is published with
+  `--provenance` from GitHub Actions, npm rejects (HTTP 422) if the
+  signed provenance source URL doesn't match `repository.url` in the
+  shipped tarball's package.json. Defense against supply-chain attacks
+  where attestation comes from a different repo than the metadata
+  claims.
+
+### Repo SSoT vs publish-canonical mirror
+
+- **Source-of-truth (development)**: `gitlab.tinfant.org/druumen/sessions-db`
+  (private to tinfant org, where MRs land + CI runs first).
+- **Publish-canonical (npm-visible)**: `github.com/druumen/sessions-db`
+  (public mirror, what `npm publish --provenance` attests to + what
+  `npm view @druumen/sessions-db | grep repository` shows consumers).
+
+This split is now documented in `README.md` and `RELEASING.md`. Issues
++ MRs continue to live on GitLab; the GitHub mirror is for `npm
+install` consumers' "view source" link + provenance attestation.
+
+### Tombstone tag note (0.1.2)
+
+- `v0.1.2` exists on GitLab + GitHub mirror as a permanent tag against
+  commit `d908df77` but is **NOT published to npm**. The OIDC publish
+  attempt got past the auth fix from 0.1.2's CI change (npm 11.5.x),
+  signed provenance to Sigstore log `1549510274` (immutable), but
+  failed at the registry PUT with `422 Unprocessable Entity` because
+  of the repo URL mismatch fixed in 0.1.3.
+- Together with `v0.1.1` (logIndex 1547090299 / 1549427812), there are
+  now **3 sigstore provenance records** on the public transparency log
+  for failed-publish attempts of this package's 0.1.x series. They
+  prove the GitHub Actions runner attempted publishes and serve as
+  audit trail.
+
+### `[ASSUMPTION]` lessons recorded (per `feedback_tag_vendor_assumptions_in_plans`)
+
+Day-of-OIDC-bringup assumption miss #2 (after the npm-version one):
+- "Provenance verification accepts any repository.url in package.json"
+  → wrong. npm rejects 422 if signed provenance source doesn't match
+  metadata. This is npm's documented behavior but wasn't surfaced in
+  the original D15 design or RELEASING.md.
+
+Will save a second feedback memory specifically for "OIDC publish
+requires repo-URL alignment with provenance signer" so future plans
+flag it.
+
 ## [0.1.2] — 2026-05-15
 
 CI-only patch. **Same source code as 0.1.1** — but 0.1.1 never actually
