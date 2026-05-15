@@ -32,6 +32,7 @@
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   rmSync,
@@ -45,13 +46,33 @@ import assert from 'node:assert/strict';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(HERE, '..', '..');
+const IS_WIN = process.platform === 'win32';
 
+// Windows wrapper detection:
+// - `npm` and `tsc` are .cmd shims on Windows, not native binaries.
+//   `spawnSync` cannot exec a .cmd directly without `shell: true`
+//   (or you get { status: null, stdout: undefined } silently).
+// - `process.execPath` (node binary) is a real exe — no shell needed.
 function runHere(cmd, args, opts = {}) {
+  // Treat anything that isn't an absolute path to node binary as a
+  // potential .cmd / shell-resolved command on Windows.
+  const needsShell = IS_WIN && cmd !== process.execPath;
   return spawnSync(cmd, args, {
     encoding: 'utf8',
     timeout: 60_000,
+    shell: needsShell,
     ...opts,
   });
+}
+
+// Pick the right tsc binary path on Windows (.cmd shim).
+function tscBinPath() {
+  return resolve(
+    PACKAGE_ROOT,
+    'node_modules',
+    '.bin',
+    IS_WIN ? 'tsc.cmd' : 'tsc',
+  );
 }
 
 test('pack-install-smoke', async (t) => {
@@ -80,7 +101,7 @@ test('pack-install-smoke', async (t) => {
   await t.test('npm install + CJS require resolves through exports map', () => {
     if (!tarballPath) return;
     const consumerDir = join(tmp, 'cjs-consumer');
-    spawnSync('mkdir', ['-p', consumerDir]);
+    mkdirSync(consumerDir, { recursive: true });
     writeFileSync(
       join(consumerDir, 'package.json'),
       JSON.stringify({ name: 'cjs-consumer', version: '0.0.0', private: true }),
@@ -119,7 +140,7 @@ test('pack-install-smoke', async (t) => {
   await t.test('ESM dynamic import resolves through exports map', () => {
     if (!tarballPath) return;
     const consumerDir = join(tmp, 'esm-consumer');
-    spawnSync('mkdir', ['-p', consumerDir]);
+    mkdirSync(consumerDir, { recursive: true });
     writeFileSync(
       join(consumerDir, 'package.json'),
       JSON.stringify({
@@ -166,14 +187,14 @@ test('pack-install-smoke', async (t) => {
     (t) => {
       if (!tarballPath) return;
 
-      const tscBin = resolve(PACKAGE_ROOT, 'node_modules', '.bin', 'tsc');
+      const tscBin = tscBinPath();
       if (!existsSync(tscBin)) {
         t.skip(`tsc not installed at ${tscBin} — skipping`);
         return;
       }
 
       const consumerDir = join(tmp, 'ts-consumer');
-      spawnSync('mkdir', ['-p', consumerDir]);
+      mkdirSync(consumerDir, { recursive: true });
       writeFileSync(
         join(consumerDir, 'package.json'),
         JSON.stringify({
