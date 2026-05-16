@@ -5,6 +5,49 @@ All notable changes to `@druumen/sessions-db` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] — 2026-05-16
+
+Hook gate relaxation so marketplace cockpit users on non-druumen
+workspaces can actually record sessions.
+
+### Changed (hook)
+
+- `cli/sessions-db-session-start-main.mjs` — the cwd-gate accepts a
+  workspace as authorized when EITHER:
+  1. a `CLAUDE.md` containing the `Druumen Workspace` sentinel exists
+     at cwd or any ancestor (original 0.1.x behavior), OR
+  2. `.dru-code/sessions-db.json` or `tickets/_logs/sessions-db.json`
+     exists at cwd or any ancestor — i.e. the workspace was already
+     opted in via cockpit's Setup Wizard or a manual `initProjection`.
+  Either marker counts as explicit user consent for this workspace.
+  Workspaces with neither still bail silently — random scratch dirs
+  still don't get session events.
+
+### Why
+
+Cockpit-vscode 0.3.0+ ships the Setup Wizard which creates
+`<workspace>/.dru-code/sessions-db.json` on Enable. Before this fix,
+the hook then rejected every SessionStart in that workspace because no
+CLAUDE.md sentinel was present — events.jsonl stayed empty and the
+SESSIONS panel showed `0 active` forever. The `.dru-code/` file
+already represents user consent; the gate now treats it as such.
+
+### Test
+
+- New `contract-1b` test in
+  `__tests__/hook/sessions-db-session-start.test.mjs` plants a
+  `.dru-code/sessions-db.json` in a workspace with NO CLAUDE.md
+  sentinel and verifies the hook records a session_seen event.
+  Existing `contract-1` still passes (workspace with neither marker
+  still rejects).
+- Full suite: 446 tests, 0 fail.
+
+### No public API change
+
+Same exported surface as 0.1.3. The gate widening is additive;
+consumers that previously passed still pass. Cockpit pin
+`>=0.1.0 <0.2.0` picks up 0.1.4 automatically on `npm install`.
+
 ## [0.1.3] — 2026-05-15
 
 CI metadata patch. **Same source code as 0.1.1 / 0.1.2** — both prior
