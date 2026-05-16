@@ -218,19 +218,64 @@ describe('sessions-db-session-start.mjs (hook integration)', () => {
       assert.equal(r.code, 0, `exit non-zero. stderr: ${r.stderr}`);
       assert.equal(r.stderr, '', `unexpected stderr: ${r.stderr}`);
 
-      // Storage anchors on the worktree (cockpit-marketplace projects
-      // typically have no tickets/_logs/ layout); the hook still routes
-      // its event under `tickets/_logs/` per storage.mjs PATHS — what
-      // matters is that the gate didn't bail.
-      const eventsPath = join(ws, 'tickets', '_logs', 'sessions-db-events.jsonl');
-      assert.equal(existsSync(eventsPath), true,
-        'events.jsonl should exist when .dru-code/ marker grants opt-in');
-      const eventLines = readFileSync(eventsPath, 'utf8').trim().split('\n');
+      // With auto-detect (step 5b), when `<ws>/.dru-code/sessions-db.json`
+      // already exists the hook writes the new event INTO `.dru-code/`,
+      // not into a freshly-created `tickets/_logs/`. This is exactly what
+      // a cockpit-marketplace user expects: the wizard created `.dru-code/`,
+      // and subsequent hook invocations append to it.
+      const druCodeEvents = join(ws, '.dru-code', 'sessions-db-events.jsonl');
+      assert.equal(existsSync(druCodeEvents), true,
+        'events.jsonl should exist under .dru-code/ when the wizard pre-initialized it');
+      const ticketsEvents = join(ws, 'tickets', '_logs', 'sessions-db-events.jsonl');
+      assert.equal(existsSync(ticketsEvents), false,
+        'hook must NOT create a parallel tickets/_logs/ when .dru-code/ is the chosen layout');
+      const eventLines = readFileSync(druCodeEvents, 'utf8').trim().split('\n');
       assert.equal(eventLines.length, 1, `expected 1 event, got ${eventLines.length}`);
       const event = JSON.parse(eventLines[0]);
       assert.equal(event.op, 'session_seen');
     } finally {
       rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  // Item 1c: DRUUMEN_SESSIONS_DB_ROOT env var overrides storage location
+  // entirely. Cockpit Setup Wizard writes this into the hook command line
+  // so a single source of truth controls where both reader and writer
+  // operate.
+  it('contract-1c cwd-gate + env-root: writes to DRUUMEN_SESSIONS_DB_ROOT location', async () => {
+    const ws = makeFakeWorkspace({ prefix: 'hook-env-root-' });
+    // Custom location OUTSIDE the workspace — proves env wins over any
+    // auto-detect of `.dru-code/` or `tickets/_logs/` inside ws.
+    const customRoot = mkTmp('hook-env-root-storage-');
+    try {
+      const transcriptPath = makeFakeTranscript(ws, FAKE_SID);
+      const r = await runHook({
+        cwd: ws,
+        stdin: JSON.stringify({
+          session_id: FAKE_SID,
+          cwd: ws,
+          transcript_path: transcriptPath,
+        }),
+        env: { HOME: ws, DRUUMEN_SESSIONS_DB_ROOT: customRoot },
+      });
+      assert.equal(r.code, 0, `exit non-zero. stderr: ${r.stderr}`);
+      assert.equal(r.stderr, '', `unexpected stderr: ${r.stderr}`);
+
+      // Hook should write events directly under customRoot (bare layout —
+      // sessions-db-events.jsonl at customRoot, NOT customRoot/tickets/_logs).
+      const envEvents = join(customRoot, 'sessions-db-events.jsonl');
+      assert.equal(existsSync(envEvents), true,
+        'events.jsonl should exist at DRUUMEN_SESSIONS_DB_ROOT');
+      const wsTicketsEvents = join(ws, 'tickets', '_logs', 'sessions-db-events.jsonl');
+      assert.equal(existsSync(wsTicketsEvents), false,
+        'hook must NOT also write to workspace tickets/_logs/ when env override is set');
+      const eventLines = readFileSync(envEvents, 'utf8').trim().split('\n');
+      assert.equal(eventLines.length, 1);
+      const event = JSON.parse(eventLines[0]);
+      assert.equal(event.op, 'session_seen');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+      rmSync(customRoot, { recursive: true, force: true });
     }
   });
 

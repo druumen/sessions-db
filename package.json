@@ -1,6 +1,6 @@
 {
   "name": "@druumen/sessions-db",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Cross-session traceability for Claude Code — events.jsonl SSoT + JSON projection cache + 3-priority identity reconciliation",
   "license": "Apache-2.0",
   "type": "module",

@@ -34,10 +34,11 @@
  * concurrent hooks for the same `claude_session_id` will serialize on the
  * lock and observe each other's mint, so identity does not split.
  *
- * cwd discipline: every storage call passes `{ root: storageRoot }` so the
- * events.jsonl + projection cache + lock file all anchor on the project
- * cwd (resolved via CLAUDE.md walk + git common-dir), NOT on the random
- * `process.cwd()` Claude Code happened to spawn the hook from.
+ * cwd discipline: every storage call passes one of `{ rootPath }` or
+ * `{ root }` derived from the gated cwd / git common-dir, NOT from the
+ * random `process.cwd()` Claude Code happened to spawn the hook from.
+ * `DRUUMEN_SESSIONS_DB_ROOT` env > auto-detected `.dru-code/` > legacy
+ * `tickets/_logs/` anchored on workspace root.
  */
 
 import { createHash } from 'node:crypto';
@@ -103,10 +104,44 @@ async function main() {
     process.exit(0);
   }
 
-  // (5) Resolve the storage root. Prefer the worktree root (so different
-  // worktrees of the same repo each accumulate their own events.jsonl) and
-  // fall back to the gated cwd. NEVER fall back to process.cwd() — see (2).
-  const storageRoot = gitCtx.worktreePath || cwd;
+  // (5) Resolve the storage root. Three-tier strategy so cockpit-marketplace
+  // users (who have a `.dru-code/` storage dir) and druumen-monorepo users
+  // (who have a `tickets/_logs/` storage dir) BOTH have their hooks write
+  // into the exact location their reader is watching:
+  //
+  //   (5a) `DRUUMEN_SESSIONS_DB_ROOT` env var overrides everything. Cockpit
+  //        Setup Wizard writes this into the hook command line so the hook
+  //        knows the precise storage dir (typically `<ws>/.dru-code`) the
+  //        user opted into via Enable. Forwarded as `{ rootPath }` —
+  //        recordSessionSeen treats it as the bare storage dir (no
+  //        `tickets/_logs/` prefix added).
+  //
+  //   (5b) Auto-detect `<workspaceRoot>/.dru-code/sessions-db.json` when no
+  //        env override is set. If the user (or wizard) opted in via the
+  //        new-convention layout we honor it without polluting their repo
+  //        with a `tickets/_logs/` subdir.
+  //
+  //   (5c) Fall back to the historic `{ root: workspaceRoot }` form which
+  //        writes under `<workspaceRoot>/tickets/_logs/`. Druumen monorepo
+  //        relies on this; existing `tickets/_logs/sessions-db.json` data
+  //        keeps accumulating in the same place.
+  //
+  // NEVER fall back to process.cwd() — see (2).
+  const workspaceRoot = gitCtx.worktreePath || cwd;
+  const envRoot = process.env.DRUUMEN_SESSIONS_DB_ROOT;
+
+  let recordTargetOpts;
+  if (typeof envRoot === 'string' && envRoot.length > 0) {
+    // (5a) env override — new-convention rootPath shape.
+    recordTargetOpts = { rootPath: envRoot };
+  } else if (existsSync(join(workspaceRoot, '.dru-code', 'sessions-db.json'))) {
+    // (5b) auto-detect .dru-code/ — new-convention rootPath shape pointing
+    // at the storage subdir, not the workspace root.
+    recordTargetOpts = { rootPath: join(workspaceRoot, '.dru-code') };
+  } else {
+    // (5c) legacy fallback — tickets/_logs/ anchored at workspace root.
+    recordTargetOpts = { root: workspaceRoot };
+  }
 
   // (6) claude_session_id — required input. Without it we cannot reconcile
   // identity at all, so we bail rather than minting a stable_id we can never
@@ -173,14 +208,13 @@ async function main() {
   // ALL the signals we have so the resolver can walk the chain and surface
   // both the matched stable_id and any parent candidates (hub-spoke hints).
   //
-  // Every storage path is anchored on `storageRoot` — events.jsonl,
-  // projection cache, and lock file all land in <storageRoot>/tickets/_logs/.
-  // This is the cwd-plumb-through fix: process.cwd() is NEVER read by
-  // storage when called this way.
+  // Storage location: `recordTargetOpts` carries either `{ rootPath }` (env
+  // override or auto-detected `.dru-code/`) or `{ root }` (legacy
+  // tickets/_logs/ anchored on workspace root) — see step (5).
   try {
     await recordSessionSeen({
       claudeSessionId,
-      root: storageRoot,
+      ...recordTargetOpts,
       lockTimeoutMs: 1500,
       transcriptMeta,
       gitContext: gitCtx,
