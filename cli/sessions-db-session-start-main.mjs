@@ -9,8 +9,10 @@
  * from a hook that is purely observational.
  *
  * Six-item safety contract (every test below cross-references one item):
- *  1. cwd-gate: bail on any cwd whose nearest CLAUDE.md does not declare a
- *     "Druumen Workspace". No event written.
+ *  1. cwd-gate: bail on any cwd that is neither a Druumen Workspace
+ *     (CLAUDE.md sentinel) nor an opted-in workspace (existing
+ *     `.dru-code/sessions-db.json` or `tickets/_logs/sessions-db.json`
+ *     under cwd or any ancestor). No event written when both rejected.
  *  2. < 2 second budget: bootstrap's setTimeout(2000ms).unref() always wins.
  *     Each sub-probe respects a single global deadline derived from
  *     `gitContext({ totalBudgetMs })` — six probes can never sum past the
@@ -76,9 +78,13 @@ async function main() {
     process.env.CLAUDE_PROJECT_DIR ||
     process.cwd();
 
-  // (3) cwd-gate. We walk up from cwd looking for a CLAUDE.md that contains
-  // the "Druumen Workspace" sentinel. Any other repo (admin, blog, a random
-  // scratch dir) bails silently.
+  // (3) cwd-gate. Accept the cwd when EITHER of:
+  //   - a CLAUDE.md "Druumen Workspace" sentinel exists at cwd or ancestor
+  //     (druumen-monorepo opt-in), OR
+  //   - a `.dru-code/sessions-db.json` or `tickets/_logs/sessions-db.json`
+  //     already exists under cwd or ancestor (cockpit Setup Wizard or
+  //     prior manual init already opted this workspace in).
+  // Any other repo bails silently.
   if (!isDruumenWorkspace(cwd)) {
     process.exit(0);
   }
@@ -262,26 +268,58 @@ function readStdinJson({ timeoutMs }) {
 }
 
 /**
- * Walk up from `cwd` looking for a CLAUDE.md whose body contains the
- * "Druumen Workspace" sentinel. Bounded to 12 ancestors so a runaway loop
- * (e.g. weird filesystem mount) cannot stall us.
+ * Decide whether the hook is allowed to record events for `cwd`.
  *
- * Returns true when sentinel found, false otherwise (incl. read errors).
+ * Two acceptance fast-paths, either of which is sufficient:
+ *
+ *   1. **Druumen Workspace sentinel** — a `CLAUDE.md` at `cwd` or any
+ *      ancestor whose body contains the literal string "Druumen Workspace".
+ *      Original 0.1.x gate; how the Druumen monorepo opts in.
+ *
+ *   2. **Pre-initialized sessions-db storage** — `.dru-code/sessions-db.json`
+ *      or `tickets/_logs/sessions-db.json` already exists at `cwd` or any
+ *      ancestor. The cockpit Setup Wizard creates this file when the user
+ *      explicitly enables sessions tracking for a workspace; an external
+ *      project that has never opted in will not have either marker.
+ *
+ * Either marker is treated as user consent for this workspace. The walk
+ * is bounded to 12 ancestors so a runaway loop (e.g. weird FS mount)
+ * cannot stall us; the loop terminates early as soon as ANY marker is
+ * found at the current level.
+ *
+ * The function name is kept (`isDruumenWorkspace`) for git history clarity
+ * even though the semantic has broadened to "authorized workspace". Both
+ * acceptance criteria are checked at each ancestor before walking up
+ * (cheap stat-only probes for the storage paths).
+ *
+ * Returns true on the first hit, false after 12 ancestors / filesystem
+ * root / read errors with no marker found.
  */
 function isDruumenWorkspace(cwd) {
   if (typeof cwd !== 'string' || cwd.length === 0) return false;
   let dir = cwd;
   for (let i = 0; i < 12; i++) {
-    const candidate = join(dir, 'CLAUDE.md');
-    if (existsSync(candidate)) {
+    // Fast-path 1: CLAUDE.md sentinel
+    const claudeMd = join(dir, 'CLAUDE.md');
+    if (existsSync(claudeMd)) {
       try {
         // We only need the first ~8KB to find the sentinel; CLAUDE.md is
         // typically short, so reading the whole file is fine.
-        const body = readFileSync(candidate, 'utf8');
+        const body = readFileSync(claudeMd, 'utf8');
         if (body.includes('Druumen Workspace')) return true;
       } catch {
         // unreadable — keep walking up just in case there's a higher one.
       }
+    }
+    // Fast-path 2: pre-initialized sessions-db storage. Stat-only — we
+    // don't read these files here, just check existence. Either convention
+    // (cockpit-marketplace `.dru-code/` or druumen-monorepo `tickets/_logs/`)
+    // counts as opt-in.
+    if (
+      existsSync(join(dir, '.dru-code', 'sessions-db.json')) ||
+      existsSync(join(dir, 'tickets', '_logs', 'sessions-db.json'))
+    ) {
+      return true;
     }
     const parent = dirname(dir);
     if (parent === dir) return false;

@@ -158,7 +158,8 @@ describe('sessions-db-session-start.mjs (hook integration)', () => {
 
   // Item 1 of the safety contract: cwd-gate.
   it('contract-1 cwd-gate: non-druumen cwd exits 0 without writing events', async () => {
-    // Make a workspace with NO CLAUDE.md sentinel — gate must reject it.
+    // Make a workspace with NEITHER a CLAUDE.md sentinel NOR a
+    // pre-initialized sessions-db storage marker — gate must reject it.
     const ws = mkTmp('hook-non-druumen-');
     try {
       const eventsPath = join(ws, 'tickets', '_logs', 'sessions-db-events.jsonl');
@@ -171,6 +172,63 @@ describe('sessions-db-session-start.mjs (hook integration)', () => {
       assert.equal(r.stderr, '');
       assert.equal(existsSync(eventsPath), false,
         'cwd-gate fail must NOT write events.jsonl');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  // Item 1b of the safety contract: cwd-gate accepts a workspace that has
+  // been opted in via an existing `.dru-code/sessions-db.json` storage
+  // marker (typically created by cockpit's Setup Wizard). No CLAUDE.md
+  // sentinel is needed in this case.
+  it('contract-1b cwd-gate: dru-code/ opt-in workspace records event', async () => {
+    // Start with a non-druumen workspace (no CLAUDE.md), then plant the
+    // .dru-code/ marker as a separate explicit opt-in — exactly what the
+    // cockpit Setup Wizard does on first enable.
+    const ws = makeFakeWorkspace({
+      prefix: 'hook-dru-code-optin-',
+      withClaude: false,
+    });
+    try {
+      mkdirSync(join(ws, '.dru-code'), { recursive: true });
+      writeFileSync(
+        join(ws, '.dru-code', 'sessions-db.json'),
+        JSON.stringify({
+          _meta: {
+            schema_version: 2,
+            fingerprint_versions: ['first_human_prompt_v1', 'lineage_prefix_v1'],
+            updated: new Date().toISOString(),
+            event_count: 0,
+            last_event_id: null,
+          },
+          sessions: {},
+        }),
+      );
+
+      const transcriptPath = makeFakeTranscript(ws, FAKE_SID);
+      const r = await runHook({
+        cwd: ws,
+        stdin: JSON.stringify({
+          session_id: FAKE_SID,
+          cwd: ws,
+          transcript_path: transcriptPath,
+        }),
+        env: { HOME: ws },
+      });
+      assert.equal(r.code, 0, `exit non-zero. stderr: ${r.stderr}`);
+      assert.equal(r.stderr, '', `unexpected stderr: ${r.stderr}`);
+
+      // Storage anchors on the worktree (cockpit-marketplace projects
+      // typically have no tickets/_logs/ layout); the hook still routes
+      // its event under `tickets/_logs/` per storage.mjs PATHS — what
+      // matters is that the gate didn't bail.
+      const eventsPath = join(ws, 'tickets', '_logs', 'sessions-db-events.jsonl');
+      assert.equal(existsSync(eventsPath), true,
+        'events.jsonl should exist when .dru-code/ marker grants opt-in');
+      const eventLines = readFileSync(eventsPath, 'utf8').trim().split('\n');
+      assert.equal(eventLines.length, 1, `expected 1 event, got ${eventLines.length}`);
+      const event = JSON.parse(eventLines[0]);
+      assert.equal(event.op, 'session_seen');
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
