@@ -5,6 +5,78 @@ All notable changes to `@druumen/sessions-db` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] — 2026-05-16
+
+Hook now writes to the same storage location its reader is watching,
+instead of always carving a fresh `tickets/_logs/` subdirectory into
+whichever workspace it happens to fire in.
+
+### Changed (hook)
+
+- `cli/sessions-db-session-start-main.mjs` — storage location strategy
+  is now three-tier (in order):
+
+  1. **`DRUUMEN_SESSIONS_DB_ROOT` env var** — explicit override forwarded
+     as `{ rootPath }`. Treated as the bare storage directory (no
+     `tickets/_logs/` prefix added). Cockpit's Setup Wizard plumbs the
+     workspace's chosen storage path through this env so a single source
+     of truth controls both reader and writer location.
+
+  2. **Auto-detect `<workspaceRoot>/.dru-code/sessions-db.json`** — when
+     this file exists (i.e. cockpit Setup Wizard or a prior init created
+     it), the hook writes alongside it via `{ rootPath: <ws>/.dru-code }`.
+     Marketplace cockpit users no longer end up with a phantom
+     `tickets/_logs/` subdirectory in their non-druumen project.
+
+  3. **Legacy `{ root: workspaceRoot }`** — falls back to the
+     pre-existing tickets/_logs/ layout anchored on the workspace root.
+     Druumen monorepo (which has a `tickets/_logs/` already) keeps
+     accumulating in the same place.
+
+### Why
+
+Before this fix, cockpit-marketplace users who clicked Setup Wizard's
+Enable button got `<ws>/.dru-code/sessions-db.json` created by the
+extension, but the SessionStart hook (running in a separate process)
+ignored that location and wrote every event to a fresh
+`<ws>/tickets/_logs/` subtree. Two consequences:
+
+- **Visible split-brain**: cockpit's path-discovery priority chain
+  picks `tickets/_logs/` once it exists (priority 3 > priority 4),
+  but until the user did a window reload the orchestrator kept
+  watching the wizard's empty `.dru-code/` stub. SESSIONS panel
+  appeared frozen at `0 active` even though events were being written.
+
+- **Workspace pollution**: an academic thesis or any non-druumen
+  project ended up with a `tickets/_logs/` subdirectory it had no
+  reason to own. With 0.1.5 the hook honors whichever convention was
+  set up — cockpit-marketplace users stay clean inside `.dru-code/`.
+
+### Test
+
+- New `contract-1c` covers the env-override path: with
+  `DRUUMEN_SESSIONS_DB_ROOT` set to a tmp dir outside the workspace,
+  the hook writes there and creates no `tickets/_logs/` in the
+  workspace.
+- Existing `contract-1b` updated: when `.dru-code/sessions-db.json`
+  pre-exists, the hook now writes to `.dru-code/` (NOT
+  `tickets/_logs/` which the old version did).
+- `happy path` and druumen-monorepo tests unchanged — workspaces with
+  no `.dru-code/` marker still get the legacy `tickets/_logs/` layout.
+- Full suite: 447 tests, 0 fail.
+
+### Backward compatibility
+
+- Druumen monorepo: zero change (no `.dru-code/` exists at any
+  ancestor → step (3) legacy path).
+- Cockpit-marketplace 0.3.0–0.3.2 users with `.dru-code/`: hook now
+  writes to `.dru-code/`. Their old data (if any) in
+  `<ws>/tickets/_logs/` is NOT migrated automatically; it stays as
+  historical record. Future events go to `.dru-code/`. After upgrading
+  cockpit to 0.3.3, the new wizard will additionally write a
+  `DRUUMEN_SESSIONS_DB_ROOT` env prefix into the hook command so
+  future enables explicitly pin the location.
+
 ## [0.1.4] — 2026-05-16
 
 Hook gate relaxation so marketplace cockpit users on non-druumen
