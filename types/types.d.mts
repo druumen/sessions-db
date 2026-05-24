@@ -71,8 +71,10 @@ export type IdentityConfidence = "exact" | "high" | "low" | "minted";
  *   close          — set outcome + closed_at + closed_reason
  *   sweep          — synthetic: activity_state transition (active → idle / archived)
  *   manual_link    — operator-supplied parent_candidate_ids merge
+ *   ai_title_seen  — hook observation: latest `type:"ai-title"` record harvested
+ *                    from the Claude Code transcript (last-write-wins; null clears)
  */
-export type EventOp = "session_seen" | "session_link" | "session_unlink" | "alias_set" | "parent_set" | "close" | "sweep" | "manual_link";
+export type EventOp = "session_seen" | "session_link" | "session_unlink" | "alias_set" | "parent_set" | "close" | "sweep" | "manual_link" | "ai_title_seen";
 /**
  * One transcript file (`~/.claude/projects/<workspace-hash>/<uuid>.jsonl`)
  * as captured in a session's `transcript_files[]`.
@@ -172,6 +174,13 @@ export type ParentCandidate = {
 export type KnownSession = {
     stable_id: SessionStableId;
     alias: (string | null);
+    /**
+     *           AI-generated session title harvested from the Claude Code
+     *           transcript's `{"type":"ai-title", "aiTitle": ...}` records.
+     *           Independent from `alias` (user-set). Display priority for
+     *           `find`: alias ?? ai_title ?? first_prompt_preview.
+     */
+    ai_title: (string | null);
     claude_session_ids: ClaudeSessionId[];
     transcript_files: TranscriptFile[];
     fingerprints: {

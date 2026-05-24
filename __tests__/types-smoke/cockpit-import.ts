@@ -208,6 +208,7 @@ const _eventOps: EventOp[] = [
   'close',
   'sweep',
   'manual_link',
+  'ai_title_seen',
 ];
 
 // ---------------------------------------------------------------------------
@@ -245,6 +246,7 @@ const _parentCandidate: ParentCandidate = {
 const _knownSession: KnownSession = {
   stable_id: 'sess_018f1234-5678-7abc-89de-0123456789ab',
   alias: null,
+  ai_title: null,
   claude_session_ids: ['550e8400-e29b-41d4-a716-446655440000'],
   transcript_files: [_transcriptFile],
   fingerprints: {

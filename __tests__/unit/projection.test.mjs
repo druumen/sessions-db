@@ -62,6 +62,76 @@ describe('projection.mjs', () => {
       assert.equal(s.created_at, TS_A);
       assert.equal(s.last_progress_at, TS_A);
       assert.equal(s.first_prompt_preview, null);
+      assert.equal(s.ai_title, null);
+    });
+  });
+
+  describe('ai_title_seen reducer (0.1.6)', () => {
+    it('sets ai_title from payload.ai_title (string)', () => {
+      const p = emptyProjection();
+      applyEvent(p, evt('ai_title_seen', TS_A, {
+        ai_title: 'refactor backend storage layer',
+        source_transcript: '/tmp/x.jsonl',
+        observed_at: TS_A,
+      }));
+      assert.equal(p.sessions[SID].ai_title, 'refactor backend storage layer');
+    });
+
+    it('last-write-wins across multiple ai_title_seen events', () => {
+      const p = emptyProjection();
+      applyEvent(p, evt('ai_title_seen', TS_A, { ai_title: 'first title' }));
+      applyEvent(p, evt('ai_title_seen', TS_B, { ai_title: 'second title' }));
+      applyEvent(p, evt('ai_title_seen', TS_C, { ai_title: 'third title' }));
+      assert.equal(p.sessions[SID].ai_title, 'third title');
+    });
+
+    it('payload.ai_title = null clears the title', () => {
+      const p = emptyProjection();
+      applyEvent(p, evt('ai_title_seen', TS_A, { ai_title: 'a title' }));
+      applyEvent(p, evt('ai_title_seen', TS_B, { ai_title: null }));
+      assert.equal(p.sessions[SID].ai_title, null);
+    });
+
+    it('missing / empty / non-string payload.ai_title is a no-op (defensive)', () => {
+      const p = emptyProjection();
+      applyEvent(p, evt('ai_title_seen', TS_A, { ai_title: 'baseline' }));
+      applyEvent(p, evt('ai_title_seen', TS_B, {}));                    // missing
+      applyEvent(p, evt('ai_title_seen', TS_C, { ai_title: '' }));      // empty
+      applyEvent(p, evt('ai_title_seen', TS_D, { ai_title: 42 }));      // non-string
+      assert.equal(p.sessions[SID].ai_title, 'baseline',
+        'defensive: only string or explicit null should mutate ai_title');
+    });
+
+    it('does NOT overwrite alias (separate fields)', () => {
+      const p = emptyProjection();
+      applyEvent(p, evt('alias_set', TS_A, { alias: 'user-set' }));
+      applyEvent(p, evt('ai_title_seen', TS_B, { ai_title: 'ai-derived' }));
+      assert.equal(p.sessions[SID].alias, 'user-set');
+      assert.equal(p.sessions[SID].ai_title, 'ai-derived');
+    });
+
+    it('rebuildFromEvents replays ai_title_seen deterministically', () => {
+      const events = [
+        evt('session_seen', TS_A, { claude_session_id: 'cs-1' }),
+        evt('ai_title_seen', TS_B, { ai_title: 'first' }),
+        evt('ai_title_seen', TS_C, { ai_title: 'final' }),
+      ];
+      const p1 = rebuildFromEvents(events);
+      const p2 = rebuildFromEvents(events);
+      assert.equal(p1.sessions[SID].ai_title, 'final');
+      assert.deepEqual(p1.sessions, p2.sessions);
+    });
+
+    it('defensive shim materializes ai_title=null on legacy sessions loaded without the field', () => {
+      // Simulate a legacy projection state where the session record was
+      // persisted before 0.1.6 (no ai_title key). Trigger any session_seen
+      // event so the shim runs.
+      const p = emptyProjection();
+      p.sessions[SID] = emptySession(SID, TS_A);
+      delete p.sessions[SID].ai_title;
+      applyEvent(p, evt('session_seen', TS_B, { claude_session_id: 'cs-1' }));
+      assert.equal(p.sessions[SID].ai_title, null,
+        'session_seen reducer must backfill ai_title for legacy records');
     });
   });
 

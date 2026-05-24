@@ -6,8 +6,10 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 
 import {
-  parseTranscriptFile,
+  AI_TITLE_TAIL_MAX_BYTES,
+  extractLatestAiTitle,
   listTranscriptFiles,
+  parseTranscriptFile,
   workspaceHashFromCwd,
 } from '../../lib/transcript.mjs';
 
@@ -220,6 +222,152 @@ describe('transcript.mjs — firstHumanPromptRaw userType fallback chain', () =>
       message: { role: 'tool', content: 'NOT_A_HUMAN_PROMPT' },
     });
     assert.equal(meta.firstHumanPromptRaw, null);
+  });
+});
+
+describe('transcript.mjs — extractLatestAiTitle', () => {
+  /**
+   * Build a JSONL fixture with arbitrary record sequence, write to tmp,
+   * return the path. Caller is responsible for cleanup.
+   */
+  function writeJsonlFixture(records, opts = {}) {
+    const tmp = mkdtempSync(join(tmpdir(), 'sdb-ai-title-'));
+    const path = join(tmp, 't.jsonl');
+    const body = records.map((r) => (typeof r === 'string' ? r : JSON.stringify(r))).join('\n')
+      + (opts.trailingNewline === false ? '' : '\n');
+    writeFileSync(path, body);
+    return { path, tmp };
+  }
+
+  it('returns null when the file does not exist', () => {
+    const out = extractLatestAiTitle('/tmp/sdb-no-such-file-xyz123.jsonl');
+    assert.equal(out, null);
+  });
+
+  it('returns null when the file is empty', () => {
+    const { path, tmp } = writeJsonlFixture([], { trailingNewline: false });
+    try {
+      assert.equal(extractLatestAiTitle(path), null);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null when the tail window contains no ai-title record', () => {
+    const { path, tmp } = writeJsonlFixture([
+      { type: 'user', message: { content: 'hi' } },
+      { type: 'assistant', message: { content: 'hello' } },
+    ]);
+    try {
+      assert.equal(extractLatestAiTitle(path), null);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('returns the latest ai-title when multiple ai-title records exist (latest wins by file position)', () => {
+    const { path, tmp } = writeJsonlFixture([
+      { type: 'user', message: { content: 'first prompt' } },
+      { type: 'ai-title', sessionId: 'abc', aiTitle: 'old title' },
+      { type: 'assistant', message: { content: 'reply' } },
+      { type: 'ai-title', sessionId: 'abc', aiTitle: 'mid title' },
+      { type: 'user', message: { content: 'follow up' } },
+      { type: 'ai-title', sessionId: 'abc', aiTitle: 'latest title' },
+      { type: 'assistant', message: { content: 'final reply' } },
+    ]);
+    try {
+      const out = extractLatestAiTitle(path);
+      assert.deepEqual(out, { aiTitle: 'latest title', sessionId: 'abc' });
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('tolerates malformed lines (skips them and returns the latest valid ai-title)', () => {
+    const { path, tmp } = writeJsonlFixture([
+      'this is not valid json',
+      JSON.stringify({ type: 'ai-title', sessionId: 's1', aiTitle: 'good title' }),
+      '{bad json missing brace',
+      JSON.stringify({ type: 'user', message: { content: 'hi' } }),
+    ]);
+    try {
+      const out = extractLatestAiTitle(path);
+      assert.deepEqual(out, { aiTitle: 'good title', sessionId: 's1' });
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('skips ai-title records without aiTitle string field', () => {
+    const { path, tmp } = writeJsonlFixture([
+      // malformed: missing aiTitle
+      { type: 'ai-title', sessionId: 'a' },
+      // malformed: aiTitle is non-string
+      { type: 'ai-title', sessionId: 'b', aiTitle: 42 },
+      // malformed: empty aiTitle
+      { type: 'ai-title', sessionId: 'c', aiTitle: '' },
+      // valid one — should win since reverse-scan reaches this last
+      { type: 'ai-title', sessionId: 'd', aiTitle: 'real title' },
+    ]);
+    try {
+      const out = extractLatestAiTitle(path);
+      assert.deepEqual(out, { aiTitle: 'real title', sessionId: 'd' });
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('handles missing sessionId field gracefully (returns sessionId: null)', () => {
+    const { path, tmp } = writeJsonlFixture([
+      { type: 'ai-title', aiTitle: 'no-session-id' },
+    ]);
+    try {
+      const out = extractLatestAiTitle(path);
+      assert.deepEqual(out, { aiTitle: 'no-session-id', sessionId: null });
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('AI_TITLE_TAIL_MAX_BYTES default is 256 KiB', () => {
+    assert.equal(AI_TITLE_TAIL_MAX_BYTES, 256 * 1024);
+  });
+
+  it('caps the scan at maxTailBytes (does NOT find ai-title earlier than the tail window)', () => {
+    // Write a huge filler so that the early ai-title is far outside the
+    // tail window, plus a guarantee the tail window contains NO ai-title.
+    const tmp = mkdtempSync(join(tmpdir(), 'sdb-ai-tail-'));
+    const path = join(tmp, 't.jsonl');
+    // Filler line that's ~1KB; we'll write a bunch then keep the tail
+    // free of any ai-title record.
+    const fillerLine = JSON.stringify({ type: 'noise', pad: 'x'.repeat(900) }) + '\n';
+    const earlyAiTitle = JSON.stringify({ type: 'ai-title', sessionId: 's1', aiTitle: 'too-early' }) + '\n';
+
+    // Order on disk: ai-title first (outside tail window), then lots of filler.
+    let body = earlyAiTitle;
+    while (body.length < 20 * 1024) body += fillerLine; // ~20 KB tail of pure filler
+    writeFileSync(path, body);
+
+    try {
+      // Scan only the last 8 KB — the ai-title is outside that window.
+      const out = extractLatestAiTitle(path, { maxTailBytes: 8 * 1024 });
+      assert.equal(out, null,
+        'ai-title outside tail window must NOT be returned (no full-file fallback)');
+
+      // Sanity: with a generous window the ai-title is found.
+      const out2 = extractLatestAiTitle(path, { maxTailBytes: 1024 * 1024 });
+      assert.ok(out2, 'with large window the ai-title should be found');
+      assert.equal(out2.aiTitle, 'too-early');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null on non-string / empty path argument', () => {
+    assert.equal(extractLatestAiTitle(''), null);
+    assert.equal(extractLatestAiTitle(null), null);
+    assert.equal(extractLatestAiTitle(undefined), null);
+    assert.equal(extractLatestAiTitle(42), null);
   });
 });
 
