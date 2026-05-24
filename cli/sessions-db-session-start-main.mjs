@@ -46,13 +46,17 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import {
+  extractLatestAiTitle,
   listTranscriptFiles,
   parseTranscriptFile,
   workspaceHashFromCwd,
 } from '../lib/transcript.mjs';
 import { sanitizeFirstPrompt } from '../lib/sanitize.mjs';
 import {
+  loadProjection,
+  newEvent,
   recordSessionSeen,
+  tryUpdateProjection,
 } from '../lib/storage.mjs';
 import { gitContext } from '../lib/git-context.mjs';
 
@@ -211,8 +215,9 @@ async function main() {
   // Storage location: `recordTargetOpts` carries either `{ rootPath }` (env
   // override or auto-detected `.dru-code/`) or `{ root }` (legacy
   // tickets/_logs/ anchored on workspace root) — see step (5).
+  let recordResult = null;
   try {
-    await recordSessionSeen({
+    recordResult = await recordSessionSeen({
       claudeSessionId,
       ...recordTargetOpts,
       lockTimeoutMs: 1500,
@@ -237,7 +242,104 @@ async function main() {
     // SSoT is the durable record; rebuild reconciles everything later.
   }
 
+  // (11) AI-title ingestion. After the session_seen event has landed and we
+  // know the stable_id, tail-scan the transcript file(s) for the most recent
+  // `{"type":"ai-title", "aiTitle":"..."}` record. Claude Code persists its
+  // AI-generated session title there and re-emits it many times as the
+  // title is refined; the latest occurrence is what the `/resume` UI shows.
+  //
+  // We separate this from the main `session_seen` payload because (a) the
+  // ai-title can change across SessionStart events for the same session,
+  // and (b) we want a dedicated audit op (`ai_title_seen`) so consumers
+  // can reason about the timeline of title changes independently from the
+  // main observation events.
+  //
+  // Spam suppression: only append `ai_title_seen` when the harvested title
+  // differs from what's already in the projection. This is best-effort
+  // (loadProjection happens outside the lock so there is a tiny race
+  // window with concurrent hooks for the same session), but the reducer is
+  // idempotent under last-write-wins so duplicates only cost log bytes,
+  // never correctness.
+  if (recordResult && recordResult.ok && typeof recordResult.stableId === 'string') {
+    try {
+      await harvestAiTitle({
+        stableId: recordResult.stableId,
+        transcriptPath,
+        recordTargetOpts,
+      });
+    } catch {
+      // Same exit-0 contract: ai_title ingestion is best-effort. A missing
+      // title doesn't degrade any existing capability — `find` falls back
+      // to alias / first_prompt_preview as before.
+    }
+  }
+
   process.exit(0);
+}
+
+/**
+ * Tail-scan `transcriptPath` for the most-recent `ai-title` record. If the
+ * harvested title differs from the projection's current `ai_title` for
+ * `stableId`, append an `ai_title_seen` event so the projection reflects
+ * the latest known title.
+ *
+ * Why we pass `transcriptPath` instead of re-listing: the hook already
+ * resolved the canonical transcript above (`locateTranscript`) and that
+ * is the file Claude Code is actively writing into for THIS session. Any
+ * older transcript files in the workspace dir are historical (we keep
+ * them indexed in `transcript_files[]` but they're not where the current
+ * ai-title gets emitted).
+ *
+ * No-op cases (all silent — hook exit-0 contract):
+ *  - transcriptPath missing or null
+ *  - tail window has no ai-title record (returns null)
+ *  - projection load fails (we treat as "title differs from nothing yet")
+ *  - title unchanged from projection
+ */
+async function harvestAiTitle({ stableId, transcriptPath, recordTargetOpts }) {
+  if (typeof transcriptPath !== 'string' || transcriptPath.length === 0) return;
+  if (!existsSync(transcriptPath)) return;
+
+  const harvested = extractLatestAiTitle(transcriptPath);
+  if (!harvested || typeof harvested.aiTitle !== 'string' || harvested.aiTitle.length === 0) {
+    return;
+  }
+
+  // Load projection (best-effort) to compare against current ai_title. If
+  // load fails we still attempt the append — duplicate suppression is a
+  // nice-to-have, durability of the audit is the contract.
+  let currentTitle = null;
+  try {
+    const projection = await loadProjection(recordTargetOpts);
+    const session = projection && projection.sessions && projection.sessions[stableId];
+    if (session && typeof session.ai_title === 'string') {
+      currentTitle = session.ai_title;
+    }
+  } catch {
+    // ignore — fall through and emit
+  }
+
+  if (currentTitle === harvested.aiTitle) return; // no-op: same title
+
+  const event = newEvent({
+    op: 'ai_title_seen',
+    stable_id: stableId,
+    payload: {
+      ai_title: harvested.aiTitle,
+      source_transcript: transcriptPath,
+      observed_at: new Date().toISOString(),
+    },
+  });
+
+  // tryUpdateProjection holds the lock across append + apply + save, so
+  // concurrent hooks cannot clobber each other's ai_title write.
+  try {
+    await tryUpdateProjection(event, { ...recordTargetOpts, lockTimeoutMs: 1500 });
+  } catch {
+    // exit-0 — durability still ensured by tryUpdateProjection's
+    // SSoT-first ordering; even on lock contention the next hook fires
+    // would converge.
+  }
 }
 
 // ---------------------------------------------------------------------------

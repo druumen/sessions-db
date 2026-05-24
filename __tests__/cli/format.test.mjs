@@ -5,6 +5,7 @@ import {
   formatJSON,
   formatSessionTable,
   formatTree,
+  pickLabel,
   relTime,
   shouldUseColor,
   truncateStableId,
@@ -93,8 +94,9 @@ describe('format.mjs', () => {
         mkSession({ stable_id: SID_A, alias: 'demo' }),
         mkSession({ stable_id: SID_B, alias: null, activity_state: 'idle' }),
       ], { useColor: false, now: Date.parse('2026-05-09T01:00:00.000Z') });
-      // Header line first
-      assert.match(out, /^stable_id +alias +state +outcome +last_progress +branch +cwd/);
+      // Header line first — column was renamed from `alias` to `label` in
+      // 0.1.6 to reflect the new priority chain alias > ai_title > preview.
+      assert.match(out, /^stable_id +label +state +outcome +last_progress +branch +cwd/);
       assert.match(out, /demo/);
       assert.match(out, /idle/);
       // No trailing whitespace per row (we trimEnd).
@@ -176,6 +178,86 @@ describe('format.mjs', () => {
     it('pretty-prints with 2-space indent and trailing newline', () => {
       const out = formatJSON({ a: 1, b: [2, 3] });
       assert.equal(out, '{\n  "a": 1,\n  "b": [\n    2,\n    3\n  ]\n}\n');
+    });
+  });
+
+  describe('pickLabel (0.1.6)', () => {
+    it('alias wins over ai_title and first_prompt_preview', () => {
+      const out = pickLabel({
+        alias: 'user-label',
+        ai_title: 'ai-derived title',
+        first_prompt_preview: 'first prompt',
+      });
+      assert.deepEqual(out, { text: 'user-label', source: 'alias' });
+    });
+
+    it('ai_title used when alias is missing', () => {
+      const out = pickLabel({
+        alias: null,
+        ai_title: 'ai-derived title',
+        first_prompt_preview: 'first prompt',
+      });
+      assert.deepEqual(out, { text: 'ai-derived title', source: 'ai_title' });
+    });
+
+    it('first_prompt_preview used when alias and ai_title are missing', () => {
+      const out = pickLabel({
+        alias: null,
+        ai_title: null,
+        first_prompt_preview: 'first prompt',
+      });
+      assert.equal(out.source, 'preview');
+      assert.equal(out.text, 'first prompt');
+    });
+
+    it('returns {text:"-", source:"none"} when nothing available', () => {
+      assert.deepEqual(pickLabel({}), { text: '-', source: 'none' });
+      assert.deepEqual(pickLabel({ alias: '', ai_title: '', first_prompt_preview: '' }),
+        { text: '-', source: 'none' });
+    });
+
+    it('truncates long preview with ellipsis', () => {
+      const long = 'x'.repeat(200);
+      const out = pickLabel({ first_prompt_preview: long });
+      assert.equal(out.source, 'preview');
+      assert.ok(out.text.endsWith('...'), `expected ellipsis, got ${out.text}`);
+      assert.ok(out.text.length <= 60, `expected <=60 chars, got ${out.text.length}`);
+    });
+
+    it('collapses newlines in label to a single line', () => {
+      const out = pickLabel({ ai_title: 'line one\nline two\nline three' });
+      assert.equal(out.text, 'line one line two line three');
+    });
+
+    it('handles malformed session input', () => {
+      assert.deepEqual(pickLabel(null), { text: '-', source: 'none' });
+      assert.deepEqual(pickLabel(undefined), { text: '-', source: 'none' });
+      assert.deepEqual(pickLabel('not-an-object'), { text: '-', source: 'none' });
+    });
+  });
+
+  describe('formatSessionTable — label column source tags (0.1.6)', () => {
+    it('renders [ai] tag for ai_title-sourced labels', () => {
+      const out = formatSessionTable([
+        mkSession({ stable_id: SID_A, alias: null, ai_title: 'AI thinks this is about caching' }),
+      ], { useColor: false, now: Date.parse('2026-05-09T01:00:00.000Z') });
+      assert.match(out, /AI thinks this is about caching \[ai\]/);
+    });
+
+    it('renders [preview] tag for first_prompt_preview-sourced labels', () => {
+      const out = formatSessionTable([
+        mkSession({ stable_id: SID_A, alias: null, ai_title: null, first_prompt_preview: 'help me refactor X' }),
+      ], { useColor: false, now: Date.parse('2026-05-09T01:00:00.000Z') });
+      assert.match(out, /help me refactor X \[preview\]/);
+    });
+
+    it('renders bare alias (no source tag) when alias is set', () => {
+      const out = formatSessionTable([
+        mkSession({ stable_id: SID_A, alias: 'my-feature', ai_title: 'AI title not shown' }),
+      ], { useColor: false, now: Date.parse('2026-05-09T01:00:00.000Z') });
+      assert.match(out, /my-feature/);
+      assert.doesNotMatch(out, /\[ai\]/);
+      assert.doesNotMatch(out, /AI title not shown/);
     });
   });
 

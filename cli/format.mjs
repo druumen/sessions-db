@@ -96,19 +96,28 @@ export function formatSessionTable(sessions, opts = {}) {
     return '(no sessions matched)\n';
   }
 
-  const rows = sessions.map((s) => ({
-    stable: truncateStableId(s.stable_id || ''),
-    alias: s.alias || '-',
-    state: s.activity_state || '-',
-    outcome: s.outcome || '-',
-    last: relTime(s.last_progress_at, now),
-    branch: truncBranch(s.branch_current || s.branch_at_start),
-    cwd: truncCwd(s.cwd || s.worktree_path_observed),
-  }));
+  const rows = sessions.map((s) => {
+    // "label" column display priority (added in 0.1.6):
+    //   alias  → user-set, highest priority
+    //   ai_title → harvested from Claude Code transcript; tagged [ai]
+    //   first_prompt_preview → first user message (truncated); tagged [preview]
+    //   '-' → none available
+    const label = pickLabel(s);
+    return {
+      stable: truncateStableId(s.stable_id || ''),
+      label: label.text,
+      labelSource: label.source,
+      state: s.activity_state || '-',
+      outcome: s.outcome || '-',
+      last: relTime(s.last_progress_at, now),
+      branch: truncBranch(s.branch_current || s.branch_at_start),
+      cwd: truncCwd(s.cwd || s.worktree_path_observed),
+    };
+  });
 
   const headers = {
     stable: 'stable_id',
-    alias: 'alias',
+    label: 'label',
     state: 'state',
     outcome: 'outcome',
     last: 'last_progress',
@@ -116,9 +125,14 @@ export function formatSessionTable(sessions, opts = {}) {
     cwd: 'cwd',
   };
 
+  // For column-width math, account for the inline source tag (`[ai]` /
+  // `[preview]`) we render alongside the label so adjacent columns don't
+  // overlap when colors strip out.
+  const labelRendered = rows.map((r) => renderLabelCell(r, /* useColor */ false));
+
   const widths = {
     stable: Math.max(headers.stable.length, ...rows.map((r) => r.stable.length)),
-    alias: Math.max(headers.alias.length, ...rows.map((r) => r.alias.length)),
+    label: Math.max(headers.label.length, ...labelRendered.map((s) => s.length)),
     state: Math.max(headers.state.length, ...rows.map((r) => r.state.length)),
     outcome: Math.max(headers.outcome.length, ...rows.map((r) => r.outcome.length)),
     last: Math.max(headers.last.length, ...rows.map((r) => r.last.length)),
@@ -127,9 +141,12 @@ export function formatSessionTable(sessions, opts = {}) {
   };
 
   const fmt = (r, isHeader = false) => {
+    const labelCell = isHeader
+      ? r.label.padEnd(widths.label)
+      : padLabelCell(r, widths.label, useColor);
     const cells = [
       r.stable.padEnd(widths.stable),
-      r.alias.padEnd(widths.alias),
+      labelCell,
       paintState(r.state, useColor && !isHeader, widths.state),
       paintOutcome(r.outcome, useColor && !isHeader, widths.outcome),
       r.last.padEnd(widths.last),
@@ -143,6 +160,82 @@ export function formatSessionTable(sessions, opts = {}) {
   lines.push(paint(fmt(headers, true), useColor ? ANSI.bold : null, useColor));
   for (const r of rows) lines.push(fmt(r));
   return lines.join('\n') + '\n';
+}
+
+/**
+ * Maximum displayed length of the "label" column body (excluding the
+ * `[ai]` / `[preview]` source tag). Aliases and ai_titles are usually
+ * short, but a raw first_prompt_preview can be ~200 chars after
+ * sanitization — we truncate to keep the table readable.
+ */
+const LABEL_MAX_LEN = 48;
+const PREVIEW_MAX_LEN = 60;
+
+/**
+ * Pick which field to display in the `find` table's "label" column, with
+ * source-aware truncation. The display priority is alias > ai_title >
+ * first_prompt_preview > "-".
+ *
+ * Returns `{ text, source }` where source is one of:
+ *   - 'alias'   — user-set label (no inline tag, the cleanest case)
+ *   - 'ai_title' — AI-harvested title (rendered with `[ai]` suffix)
+ *   - 'preview' — sanitized first prompt excerpt (rendered with `[preview]`
+ *     suffix) — truncated to 60 chars to fit the table
+ *   - 'none'    — nothing available; text is '-'
+ *
+ * Exported so tests + future tooling (e.g. tree-view) can apply the same
+ * "what should we call this session" priority without re-implementing it.
+ */
+export function pickLabel(session) {
+  if (!session || typeof session !== 'object') return { text: '-', source: 'none' };
+  if (typeof session.alias === 'string' && session.alias.length > 0) {
+    return { text: truncateLabel(session.alias, LABEL_MAX_LEN), source: 'alias' };
+  }
+  if (typeof session.ai_title === 'string' && session.ai_title.length > 0) {
+    return { text: truncateLabel(session.ai_title, LABEL_MAX_LEN), source: 'ai_title' };
+  }
+  if (typeof session.first_prompt_preview === 'string' && session.first_prompt_preview.length > 0) {
+    return {
+      text: truncateLabel(session.first_prompt_preview, PREVIEW_MAX_LEN),
+      source: 'preview',
+    };
+  }
+  return { text: '-', source: 'none' };
+}
+
+function truncateLabel(text, max) {
+  // Collapse newlines so the label stays a single visual cell.
+  const flat = text.replace(/[\r\n]+/g, ' ').trim();
+  if (flat.length <= max) return flat;
+  return flat.slice(0, max - 3) + '...';
+}
+
+/**
+ * Render a row's label cell as plain text (no color) for column-width math.
+ * Includes the inline `[ai]` / `[preview]` source tag so the width
+ * calculation is accurate.
+ */
+function renderLabelCell(row, useColor) {
+  const tag = row.labelSource === 'ai_title'
+    ? ' [ai]'
+    : row.labelSource === 'preview'
+      ? ' [preview]'
+      : '';
+  if (!useColor || tag.length === 0) return row.label + tag;
+  return row.label + paint(tag, ANSI.dim, true);
+}
+
+/**
+ * Pad a label cell to `width` columns, applying the source tag and
+ * (optionally) ANSI color. Color codes are not counted toward padding —
+ * we compute the plain-text width first, then inject color around the
+ * tag so columns align visually whether color is on or off.
+ */
+function padLabelCell(row, width, useColor) {
+  const plain = renderLabelCell(row, /* useColor */ false);
+  const pad = ' '.repeat(Math.max(0, width - plain.length));
+  if (!useColor) return plain + pad;
+  return renderLabelCell(row, /* useColor */ true) + pad;
 }
 
 function paintState(state, useColor, width) {

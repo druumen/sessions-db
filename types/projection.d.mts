@@ -19,6 +19,7 @@ export function emptyProjection(): {
 export function emptySession(stableId: string, ts: string): {
     stable_id: string;
     alias: any;
+    ai_title: any;
     claude_session_ids: any[];
     transcript_files: any[];
     fingerprints: {

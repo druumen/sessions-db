@@ -5,6 +5,95 @@ All notable changes to `@druumen/sessions-db` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] — 2026-05-24
+
+Ingest Claude Code's AI-generated session title from transcript
+`{"type":"ai-title", ...}` records so `sessions-db find` shows
+meaningful labels even before the operator sets an alias.
+
+### Added
+
+- **`lib/transcript.mjs` — `extractLatestAiTitle(path, opts?)`**
+  Tail-scans the last `AI_TITLE_TAIL_MAX_BYTES` (default 256 KiB) of a
+  transcript jsonl and returns the most-recent
+  `{"type":"ai-title", "aiTitle":"...", "sessionId":"..."}` record's
+  `{ aiTitle, sessionId }`. Returns `null` when none found in the tail
+  window — no full-file fallback (keeps the hook fast on multi-MB
+  transcripts). Tolerates malformed JSON lines (including the truncated
+  leading line that the tail window almost always starts mid-record)
+  and records missing the `aiTitle` field. The constant
+  `AI_TITLE_TAIL_MAX_BYTES` is exported so library consumers can tune
+  the cap.
+
+- **New projection field `ai_title: string|null`** on every
+  `KnownSession`. Independent from `alias` — `alias` stays user-set
+  semantics (operator opts into a deliberate label), `ai_title` is the
+  AI-derived rolling label Claude Code shows in `/resume`. Existing
+  sessions loaded from a pre-0.1.6 projection are defensively
+  backfilled with `ai_title: null` on the next `session_seen` so
+  consumers can read the field unconditionally.
+
+- **New event op `ai_title_seen`** with payload
+  `{ ai_title: string|null, source_transcript?: string, observed_at?: Iso8601 }`.
+  Last-write-wins; `ai_title: null` clears the field. Reducer is
+  idempotent under replay and rebuild.
+
+- **Hook integration** — `cli/sessions-db-session-start-main.mjs` now,
+  after `recordSessionSeen` lands the `session_seen` event, tail-scans
+  the canonical transcript and appends an `ai_title_seen` event when
+  the harvested title differs from the projection's current value.
+  Duplicate-suppression is best-effort (read happens outside the lock);
+  even on a race the reducer's last-write-wins semantics keep the final
+  state consistent. Failures are silent per the hook exit-0 contract.
+
+### Changed
+
+- **`sessions-db find` table** — the column previously labeled `alias`
+  is now `label` and follows display priority `alias` → `ai_title` →
+  `first_prompt_preview` → `-`. Non-alias labels are tagged with an
+  inline source marker so operators can tell what they're reading:
+  - `[ai]` for ai_title-sourced labels
+  - `[preview]` for first_prompt_preview-sourced labels
+  - bare (no tag) for user-set alias
+  `--json` output is unchanged: it still emits the raw `alias`,
+  `ai_title`, `first_prompt_preview` fields independently so machine
+  consumers can apply their own priority.
+
+- **`cli/format.mjs`** exports a new pure helper `pickLabel(session)`
+  returning `{ text, source }` so other tooling (tree-view, future
+  TUI) can apply the same priority chain without re-implementing it.
+
+### Backward compatibility
+
+- `schema_version` stays at `2`. The `ai_title` field is additive; old
+  events.jsonl files rebuild cleanly (new field defaults to null).
+  Existing `0.1.x` cockpit consumers can read the new field through
+  `KnownSession.ai_title` (TypeScript declarations updated) or ignore
+  it entirely without any code change.
+- No new npm dependencies.
+- Hook hard-timeout (2 s) and exit-0 contract unchanged: ai_title
+  harvest is wrapped in its own try/catch so any IO failure (missing
+  transcript, locked projection, corrupted tail) silently degrades to
+  "no ai_title update" rather than blocking Claude Code start.
+
+### Tests
+
+- New unit tests in `__tests__/unit/transcript.test.mjs` for
+  `extractLatestAiTitle`: latest-by-position win, malformed-line
+  tolerance, ai-title-without-aiTitle-field skip, tail-window cap
+  enforcement (no full-file fallback), null returns for missing
+  path / empty file / non-string input.
+- New unit tests in `__tests__/unit/projection.test.mjs` for the
+  `ai_title_seen` reducer: last-write-wins, explicit-null clear,
+  defensive no-op on missing / empty / non-string payload, alias
+  independence, rebuild determinism, legacy-record backfill.
+- New unit tests in `__tests__/cli/format.test.mjs` for `pickLabel`
+  and the source tag rendering.
+- Existing format test updated for the renamed column header
+  (`alias` → `label`).
+- types-smoke updated for the new `ai_title` field on `KnownSession`
+  and the new `ai_title_seen` EventOp.
+
 ## [0.1.5] — 2026-05-16
 
 Hook now writes to the same storage location its reader is watching,
