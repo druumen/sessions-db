@@ -27,12 +27,37 @@ cost (no MCP schema tax) — the inverse of `find`'s structured filtering.
   - `--state` restricts to active/idle/archived; `--limit` (default 20).
 - **`lib/search.mjs`** — pure helpers (`sessionMetadataFields`,
   `matchSessionMetadata`, `recordText`, `extractSnippet`), unit-tested.
+- **`search --content` disk fallback** — when a session has no recorded
+  `transcript_files`, content search now discovers its transcript on disk
+  (cwd → `workspaceHashFromCwd` → `listTranscriptFiles`, filtered to files
+  whose embedded sessionId matches the session's `claude_session_ids`), so
+  sessions the hook never linked are still content-searchable. Disk-discovered
+  hits are tagged `content(disk)` in `matched_in`. Per-invocation cached;
+  best-effort (returns nothing on missing cwd/ids or absent workspace dir).
+
+### Fixed
+
+- **`workspaceHashFromCwd` (lib/transcript.mjs) — non-alphanumeric encoding.**
+  It mapped only `/` and `.` to `-`, but Claude Code's `~/.claude/projects/`
+  directory encoding replaces EVERY non-alphanumeric char (`_`, space, `~`,
+  non-ASCII) with `-`, per character (consecutive separators not collapsed).
+  Any workspace whose path contained `_`/space/`~`/non-ASCII therefore hashed
+  to a directory name that never matched reality, silently breaking transcript
+  location in the SessionStart hook (tiers 2+3) — the primary cause of empty
+  `transcript_files`. Fixed to `replace(/[^a-zA-Z0-9]/g, '-')`; verified
+  against live directories. This restores go-forward transcript linkage for
+  underscore/space/non-ASCII workspaces (the common case) and is the
+  precondition for the `--content` disk fallback above.
 
 ### Notes
 
-- Content search only covers sessions whose projection record has populated
-  `transcript_files`; sessions whose transcript wasn't linked by identity
-  resolution are metadata-searchable only.
+- The hash fix recovers GO-FORWARD coverage (new sessions link correctly) and
+  makes surviving transcripts discoverable; it does not resurrect transcripts
+  that were rotated/deleted — most historically-empty `transcript_files` are
+  genuine lost history, not an index gap. A backfill command (replay synthetic
+  `session_seen` events into the projection) remains a possible follow-up for
+  populating the canonical projection (which also feeds identity-lineage
+  matching), distinct from the search-side fallback.
 
 ## [0.1.6] — 2026-05-24
 

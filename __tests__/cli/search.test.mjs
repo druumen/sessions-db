@@ -1,7 +1,12 @@
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { searchByMetadata } from '../../cli/search.mjs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { searchByMetadata, discoverTranscriptPaths, makeDiskCache } from '../../cli/search.mjs';
+import { workspaceHashFromCwd } from '../../lib/transcript.mjs';
 
 const SID_A = 'sess_aaaaaaaa-1111-7000-8000-000000000001';
 const SID_B = 'sess_bbbbbbbb-2222-7000-8000-000000000002';
@@ -72,5 +77,63 @@ describe('search — searchByMetadata (pure)', () => {
   it('empty on no match', () => {
     const proj = mkProjection([mkSession(SID_A, { alias: 'foo' })]);
     assert.deepEqual(searchByMetadata(proj, 'zzz'), []);
+  });
+});
+
+describe('search — discoverTranscriptPaths (disk fallback)', () => {
+  let projectsRoot;
+  let prevEnv;
+  // cwd has an underscore on purpose — also exercises the hash fix.
+  const CWD = '/tmp/fake_ws';
+  const HASH = workspaceHashFromCwd(CWD); // -tmp-fake-ws
+
+  before(() => {
+    projectsRoot = mkdtempSync(join(tmpdir(), 'cockpit-projects-'));
+    prevEnv = process.env.DRUUMEN_CLAUDE_PROJECTS_ROOT;
+    process.env.DRUUMEN_CLAUDE_PROJECTS_ROOT = projectsRoot;
+    const wsDir = join(projectsRoot, HASH);
+    mkdirSync(wsDir, { recursive: true });
+    // Two transcripts: one whose sessionId matches the session, one that doesn't.
+    writeFileSync(
+      join(wsDir, 'match.jsonl'),
+      JSON.stringify({ type: 'user', sessionId: 'uuid-match', message: { content: 'hi' } }) + '\n',
+    );
+    writeFileSync(
+      join(wsDir, 'other.jsonl'),
+      JSON.stringify({ type: 'user', sessionId: 'uuid-other', message: { content: 'hi' } }) + '\n',
+    );
+  });
+
+  after(() => {
+    if (prevEnv === undefined) delete process.env.DRUUMEN_CLAUDE_PROJECTS_ROOT;
+    else process.env.DRUUMEN_CLAUDE_PROJECTS_ROOT = prevEnv;
+    rmSync(projectsRoot, { recursive: true, force: true });
+  });
+
+  it('discovers the transcript whose sessionId matches claude_session_ids', async () => {
+    const session = { cwd: CWD, claude_session_ids: ['uuid-match'], transcript_files: [] };
+    const found = await discoverTranscriptPaths(session, makeDiskCache());
+    assert.equal(found.length, 1);
+    assert.ok(found[0].endsWith('match.jsonl'));
+  });
+
+  it('does not return transcripts whose sessionId is not in claude_session_ids', async () => {
+    const session = { cwd: CWD, claude_session_ids: ['uuid-nope'], transcript_files: [] };
+    assert.deepEqual(await discoverTranscriptPaths(session, makeDiskCache()), []);
+  });
+
+  it('returns [] when cwd is missing', async () => {
+    const session = { cwd: null, claude_session_ids: ['uuid-match'], transcript_files: [] };
+    assert.deepEqual(await discoverTranscriptPaths(session, makeDiskCache()), []);
+  });
+
+  it('returns [] when claude_session_ids is empty', async () => {
+    const session = { cwd: CWD, claude_session_ids: [], transcript_files: [] };
+    assert.deepEqual(await discoverTranscriptPaths(session, makeDiskCache()), []);
+  });
+
+  it('returns [] for a workspace dir that does not exist', async () => {
+    const session = { cwd: '/tmp/no_such_ws_xyz', claude_session_ids: ['uuid-match'], transcript_files: [] };
+    assert.deepEqual(await discoverTranscriptPaths(session, makeDiskCache()), []);
   });
 });
