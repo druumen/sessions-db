@@ -5,6 +5,35 @@ All notable changes to `@druumen/sessions-db` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Add a free-text `search` subcommand so AI tools (and humans) can locate the
+past session that discussed/decided something, over Bash, at minimal context
+cost (no MCP schema tax) — the inverse of `find`'s structured filtering.
+
+### Added
+
+- **`sessions-db search <query>` (cli/search.mjs)** — read-only, two tiers:
+  - default: case-insensitive substring match across session **metadata**
+    (alias / first prompt / branch / cwd / task / project / stable_id /
+    claude_session_ids). Fast — projection only.
+  - `--content` (alias `--deep`): ALSO scans **transcript message text**
+    (`.jsonl`) and returns a snippet around the first hit. Slower (reads
+    transcript files; `--max-file-mb` caps per-file size, default 32).
+  - A session matches if EITHER tier hits; `matched_in` reports which, and
+    `--json` (recommended for AI consumers) emits
+    `{ stable_id, alias, first_prompt_preview, activity_state,
+    last_progress_at, claude_session_ids, matched_in, snippet }`.
+  - `--state` restricts to active/idle/archived; `--limit` (default 20).
+- **`lib/search.mjs`** — pure helpers (`sessionMetadataFields`,
+  `matchSessionMetadata`, `recordText`, `extractSnippet`), unit-tested.
+
+### Notes
+
+- Content search only covers sessions whose projection record has populated
+  `transcript_files`; sessions whose transcript wasn't linked by identity
+  resolution are metadata-searchable only.
+
 ## [0.1.6] — 2026-05-24
 
 Ingest Claude Code's AI-generated session title from transcript
