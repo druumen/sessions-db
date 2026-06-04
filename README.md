@@ -86,7 +86,9 @@ session) share the same shape.
 npm install -g @druumen/sessions-db
 sessions-db --help
 
-sessions-db find --limit 10                   # list recent sessions
+sessions-db find --limit 10                   # list recent sessions (structured filters)
+sessions-db search "pricing" --json           # free-text search (metadata; AI-friendly)
+sessions-db search "RLS regression" --content # also scan transcript text + snippet
 sessions-db tree sess_019e0f2d-c6e3...        # ancestry / descendants
 sessions-db alias sess_019e0f2d-c6e3 "label"  # human-readable alias
 sessions-db link sess_xxx --task feat-foo.md  # link to ticket / project

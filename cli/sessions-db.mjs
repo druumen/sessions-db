@@ -35,6 +35,7 @@
 
 const COMMANDS = {
   find: () => import('./find.mjs'),
+  search: () => import('./search.mjs'),
   tree: () => import('./tree.mjs'),
   alias: () => import('./alias.mjs'),
   link: () => import('./link.mjs'),
@@ -50,6 +51,7 @@ function printRootHelp() {
     '',
     'Commands:',
     '  find          Filter sessions by task / project / alias / branch / cwd / state / outcome',
+    '  search        Free-text search sessions (metadata; --content scans transcript text)',
     '  tree          Render hub-spoke parent → children subtree',
     '  alias         Set / change / clear a session alias',
     '  link          Link a session to a task or project (or --remove via session_unlink)',
