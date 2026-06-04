@@ -24,6 +24,28 @@ describe('transcript.mjs — workspaceHashFromCwd', () => {
     );
   });
 
+  // Regression: the encoder must map EVERY non-alphanumeric char to '-', not
+  // just '/' and '.'. These outputs were verified against the real
+  // ~/.claude/projects/<hash>/ directories on disk.
+  it('dash-encodes underscores (the common case the old regex missed)', () => {
+    assert.equal(
+      workspaceHashFromCwd('/Users/zm_leng/Documents/druumen/drummen.com_cn'),
+      '-Users-zm-leng-Documents-druumen-drummen-com-cn',
+    );
+  });
+
+  it('dash-encodes spaces and ~ per-character', () => {
+    assert.equal(
+      workspaceHashFromCwd('/Users/x/Mobile Documents/com~apple~CloudDocs'),
+      '-Users-x-Mobile-Documents-com-apple-CloudDocs',
+    );
+  });
+
+  it('does NOT collapse consecutive separators (space + CJK runs)', () => {
+    // "/0 personal/留学/" → "-0-personal----" (space + 留 + 学 + / → 4 dashes)
+    assert.equal(workspaceHashFromCwd('/0 personal/留学/x'), '-0-personal----x');
+  });
+
   it('throws on a non-absolute path', () => {
     assert.throws(() => workspaceHashFromCwd('relative/path'), /absolute path/);
     assert.throws(() => workspaceHashFromCwd(''), /absolute path/);

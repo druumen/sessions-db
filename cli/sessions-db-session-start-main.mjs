@@ -533,6 +533,13 @@ function buildSessionSeenPayload({
     worktree_realpath: gitCtx.worktreeRealpath,
     worktree_registry_name: gitCtx.registryName,
     git_common_dir: gitCtx.gitCommonDir,
+    // transcript_file is null (→ session ends up with empty transcript_files,
+    // metadata-searchable only) precisely when one of: (1) locateTranscript
+    // found nothing in any tier, (2) the located path didn't exist at parse
+    // time, (3) parseTranscriptFile threw, or (4) the file was oversized. NOTE:
+    // tiers 2+3 of locateTranscript route through workspaceHashFromCwd, which
+    // historically mis-encoded '_'/space/non-ASCII paths — see the fix in
+    // lib/transcript.mjs. `search --content` has a disk fallback for the gap.
     transcript_file: transcriptMeta && transcriptPath ? {
       path: transcriptPath,
       first_uuid: transcriptMeta.firstUuid,
