@@ -120,13 +120,34 @@ export function markPromoterAlive(opts?: object, markOpts?: {
  * Is a promoter alive for this storage root? See `markPromoterAlive` for why
  * this gate exists and why "no" must mean "do not defer".
  *
+ * Two independent ways to answer "no":
+ *
+ *   1. the marker is missing or older than `maxAgeMs` (30 days) — the coarse,
+ *      original check;
+ *   2. the marker is stale (`PROMOTER_STALE_AFTER_MS`) AND at least
+ *      `PROMOTER_BACKLOG_MIN_COUNT` sessions were staged after it was last
+ *      refreshed and are still sitting there unpromoted. A live promoter
+ *      refreshes the marker hourly, so this combination means deferral is
+ *      writing into a void.
+ *
+ * When (2) fires the marker is RETIRED (unlinked), not merely ignored. The
+ * evidence is the pending backlog, and the backlog expires at
+ * `PENDING_MAX_AGE_MS`; leaving the marker in place would make the answer
+ * oscillate — distrust for a day, trust again once the evidence was GC'd,
+ * losing another day of sessions before it re-accumulated. Retiring makes the
+ * decision stick, and it is self-healing in the right direction: the very
+ * next real prompt-hook run calls `markPromoterAlive`, recreates the marker,
+ * and deferral resumes. Deleting is best-effort and never throws; if it
+ * fails, the worst case is the oscillation we were avoiding, never a loss.
+ *
  * @param {object} [opts]
- * @param {{ maxAgeMs?: number, now?: number }} [checkOpts]
+ * @param {{ maxAgeMs?: number, now?: number, staleAfterMs?: number }} [checkOpts]
  * @returns {boolean}
  */
 export function isPromoterAlive(opts?: object, checkOpts?: {
     maxAgeMs?: number;
     now?: number;
+    staleAfterMs?: number;
 }): boolean;
 /**
  * Garbage-collect pending records older than `maxAgeMs`.
@@ -161,6 +182,12 @@ export const PENDING_DIRNAME: "sessions-db-pending";
  * recording it at first-prompt time. 24 h is deliberately generous: the cost
  * of keeping a stale 200-byte file is nil, the cost of dropping a real
  * session's start time is a wrong `created_at`.
+ *
+ * The "which is worse than simply recording it at first-prompt time" clause is
+ * load-bearing and rests entirely on the prompt hook recording a session it
+ * cannot find (step (9a) there). Without that, GC here does not cost a start
+ * time — it costs the whole session, and "left the tab open on Friday, typed
+ * on Monday" is enough to trigger it.
  */
 export const PENDING_MAX_AGE_MS: number;
 /**
@@ -177,6 +204,33 @@ export const PROMOTER_MARKER: ".promoter";
  * must not have deferral silently switch off underneath them.
  */
 export const PROMOTER_MAX_AGE_MS: number;
+/**
+ * Secondary liveness signal — thresholds.
+ *
+ * The 30-day marker window above is right for its stated question ("is the
+ * hook configured?") but it opens a 30-day blind spot for the failure it
+ * exists to catch: a user who removes the `UserPromptSubmit` registration
+ * while staying on 0.2.0 keeps a marker that is still "fresh" by that
+ * standard, so SessionStart keeps deferring and NOTHING promotes — sessions
+ * are staged, expire at `PENDING_MAX_AGE_MS`, and are lost. Silently. For a
+ * month. That is precisely the failure the marker was introduced to prevent.
+ *
+ * So the marker is cross-examined once it goes stale: a promoter that is
+ * running refreshes it at least hourly (see `PROMOTER_REFRESH_MS`), therefore
+ * a marker untouched for `PROMOTER_STALE_AFTER_MS` while sessions kept being
+ * staged behind it is evidence of a backlog nobody is draining.
+ *
+ * Thresholds are deliberately loose, because a false positive costs ghost
+ * records (the pre-0.2.0 behaviour) and a false negative costs sessions.
+ * Ghost stagings alone do NOT trip it — an idle machine's warm-pool spawns
+ * are staged and never promoted in normal operation too, so the discriminator
+ * is that they piled up AFTER the marker went quiet.
+ */
+export const PROMOTER_STALE_AFTER_MS: number;
+/** Staged records newer than the marker needed before we stop trusting it. */
+export const PROMOTER_BACKLOG_MIN_COUNT: 3;
+/** ...and each must be at least this old — a fresh one may promote any second. */
+export const PROMOTER_BACKLOG_MIN_AGE_MS: number;
 export type PendingRecord = {
     claude_session_id: string;
     /**

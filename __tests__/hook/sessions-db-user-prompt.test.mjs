@@ -20,6 +20,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -258,18 +259,19 @@ describe('SessionStart deferral (ghost prevention)', () => {
   it('a single real prompt-hook run flips SessionStart into deferring', async () => {
     const ws = makeFakeWorkspace({ prefix: 'defer-handshake-', withPromoter: false });
     try {
-      // A prompt for a session nobody recorded: the hook takes the heartbeat
-      // path, finds no stable_id, writes no event — but does leave its marker.
+      // A prompt for a session nobody recorded: the hook records it (see the
+      // "unknown session IS recorded" test) and, either way, leaves its
+      // marker — the marker is written before any decision about what to
+      // write, precisely so that even an ignored prompt proves the hook runs.
       const primed = await runPromptHook({
         cwd: ws,
         stdin: JSON.stringify({ session_id: PRIME_SID, cwd: ws, prompt: 'priming run' }),
         env: { HOME: ws },
       });
       assert.equal(primed.code, 0, `stderr: ${primed.stderr}`);
-      assert.equal(readEvents(ws).length, 0,
-        'a prompt for an unknown session must not write anything, marker aside');
       assert.equal(existsSync(join(pendingDirOf(ws), '.promoter')), true,
         'the prompt hook must announce itself so SessionStart can trust deferral');
+      const afterPriming = readEvents(ws).length;
 
       const r = await runStartHook({
         cwd: ws,
@@ -277,7 +279,8 @@ describe('SessionStart deferral (ghost prevention)', () => {
         env: { HOME: ws },
       });
       assert.equal(r.code, 0, `stderr: ${r.stderr}`);
-      assert.equal(readEvents(ws).length, 0, 'now that a promoter exists, defer');
+      assert.equal(readEvents(ws).length, afterPriming,
+        'now that a promoter exists, the new session is deferred, not recorded');
       assert.equal(existsSync(join(pendingDirOf(ws), `${FAKE_SID}.json`)), true);
     } finally {
       rmSync(ws, { recursive: true, force: true });
@@ -334,6 +337,38 @@ describe('SessionStart deferral (ghost prevention)', () => {
       assert.ok(readEvents(ws).length > before,
         'a known session must still be observed, not deferred');
       assert.equal(existsSync(join(pendingDirOf(ws), `${FAKE_SID}.json`)), false);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  // Invariant-false side of deferral: staging is a PROMISE that something
+  // will promote later. When the staging write fails, that promise is void —
+  // nothing is on disk to promote and nothing has been recorded, so the
+  // session disappears. `writePending` swallows its own errors by contract
+  // (full disk, read-only FS, EPERM), so the return value is the only signal
+  // that this happened, and ignoring it made every one of those cases a
+  // silently lost session.
+  it('records eagerly when the pending record cannot be written', async () => {
+    const ws = makeFakeWorkspace({ prefix: 'defer-staging-fails-' });
+    try {
+      // Occupy the destination path with a directory: the tmp write succeeds,
+      // the rename onto it fails, writePending returns false. Chosen over a
+      // chmod because it behaves identically for root (CI containers).
+      mkdirSync(join(pendingDirOf(ws), `${FAKE_SID}.json`), { recursive: true });
+
+      const r = await runStartHook({
+        cwd: ws,
+        stdin: JSON.stringify({ session_id: FAKE_SID, cwd: ws }),
+        env: { HOME: ws },
+      });
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+
+      const events = readEvents(ws);
+      assert.equal(events.length, 1,
+        'a failed staging must fall back to recording, not vanish');
+      assert.equal(events[0].op, 'session_seen');
+      assert.equal(events[0].payload.claude_session_id, FAKE_SID);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
@@ -504,6 +539,76 @@ describe('UserPromptSubmit hook — safety contract', () => {
       rmSync(ws, { recursive: true, force: true });
     }
   });
+
+  // -------------------------------------------------------------------------
+  // Storage anchoring when git is unavailable.
+  //
+  // `gitContextFast` collapses EVERY non-zero git exit into `not_a_repo` +
+  // `worktreePath: null` — and "non-zero" covers much more than "outside a
+  // repo". `fatal: detected dubious ownership` is the realistic one: shared
+  // checkouts, containers, dev-offload mounts. SessionStart bails on
+  // not_a_repo, so if this hook instead falls back to `workspaceRoot = cwd`
+  // the two hooks pick different databases — and the one this hook picks is
+  // whatever subdirectory the user happened to be in, which it then CREATES.
+  // -------------------------------------------------------------------------
+  it('does not create a database in a subdirectory when git fails', async () => {
+    if (process.platform === 'win32') return; // shebang shim is POSIX-only
+    const fakeGitDir = mkTmp('prompt-fake-git-dubious-');
+    writeFileSync(join(fakeGitDir, 'git'),
+      "#!/bin/sh\nprintf '%s\\n' 'fatal: detected dubious ownership in repository' 1>&2\nexit 128\n");
+    spawnSync('chmod', ['755', join(fakeGitDir, 'git')]);
+    const ws = makeFakeWorkspace({ prefix: 'prompt-git-dubious-', withGit: false });
+    const deep = join(ws, 'packages', 'deep', 'app');
+    mkdirSync(deep, { recursive: true });
+    try {
+      const r = await runPromptHook({
+        cwd: deep,
+        stdin: JSON.stringify({ session_id: FAKE_SID, cwd: deep, prompt: 'hello' }),
+        env: { HOME: ws, PATH: `${fakeGitDir}${delimiter}${process.env.PATH}` },
+      });
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+      assert.equal(existsSync(join(deep, 'tickets')), false,
+        'no storage tree may be created inside the user\'s repo');
+      assert.equal(existsSync(join(deep, '.dru-code')), false);
+    } finally {
+      rmSync(fakeGitDir, { recursive: true, force: true });
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  // ...but bailing must be conditional on "this is not a storage root", not
+  // on "git failed" — a workspace that already holds the database is a valid
+  // anchor with or without git, and refusing there would drop heartbeats for
+  // everyone on a wedged repo.
+  it('still writes when git fails but the cwd IS already a storage root', async () => {
+    if (process.platform === 'win32') return;
+    const fakeGitDir = mkTmp('prompt-fake-git-dubious2-');
+    writeFileSync(join(fakeGitDir, 'git'),
+      "#!/bin/sh\nprintf '%s\\n' 'fatal: detected dubious ownership in repository' 1>&2\nexit 128\n");
+    spawnSync('chmod', ['755', join(fakeGitDir, 'git')]);
+    const ws = makeFakeWorkspace({ prefix: 'prompt-git-dubious-anchored-', withGit: false });
+    try {
+      // An initialized database at the cwd itself — what `sessions-db init`
+      // or the cockpit Setup Wizard leaves behind.
+      mkdirSync(logsDir(ws), { recursive: true });
+      writeFileSync(projectionPath(ws), JSON.stringify({
+        _meta: { schema_version: 2, event_count: 0, last_event_id: null, updated: null },
+        sessions: {},
+      }));
+
+      const r = await runPromptHook({
+        cwd: ws,
+        stdin: JSON.stringify({ session_id: FAKE_SID, cwd: ws, prompt: 'hello' }),
+        env: { HOME: ws, PATH: `${fakeGitDir}${delimiter}${process.env.PATH}` },
+      });
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+      assert.equal(existsSync(join(pendingDirOf(ws), '.promoter')), true,
+        'the hook must still run against an established storage root');
+    } finally {
+      rmSync(fakeGitDir, { recursive: true, force: true });
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('UserPromptSubmit hook — promotion and heartbeat', () => {
@@ -611,10 +716,52 @@ describe('UserPromptSubmit hook — promotion and heartbeat', () => {
       const events = readEvents(ws);
       assert.equal(events.length, 2);
       assert.equal(events[1].op, 'session_progress');
-      // The event payload DOES carry the later prompt — the first-write-wins
-      // rule lives in the reducer, not in the writer, so a rebuild from
-      // events.jsonl reaches the same answer.
-      assert.equal(events[1].payload.first_prompt_preview, 'ok');
+      // ...and the later prompt is not even written to the log. The reducer
+      // discards it (first-write-wins), so sending it achieved nothing except
+      // persisting a 200-char excerpt of EVERY prompt into an append-only
+      // file. The writer now skips it whenever the record already has one;
+      // the case that still needs it is covered by the next test.
+      assert.equal(events[1].payload.first_prompt_preview, null,
+        'a record that already has a preview must not get another one logged');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  // The other side of that suppression: a record with NO preview must still
+  // get one from the next prompt. Sessions recorded before this hook existed
+  // (and any whose projection write failed) live in exactly that state, and
+  // they are the reason the payload field exists at all.
+  it('a record with no preview yet still gets one — exactly once', async () => {
+    // withPromoter:false makes SessionStart record eagerly, and with no
+    // transcript there is no preview to record: a pre-0.2.0-shaped row.
+    const ws = makeFakeWorkspace({ prefix: 'heartbeat-preview-backfill-', withPromoter: false });
+    try {
+      await runStartHook({
+        cwd: ws,
+        stdin: JSON.stringify({ session_id: FAKE_SID, cwd: ws }),
+        env: { HOME: ws },
+      });
+      assert.equal(onlySession(ws).first_prompt_preview, null);
+
+      await runPromptHook({
+        cwd: ws,
+        stdin: JSON.stringify({ session_id: FAKE_SID, cwd: ws, prompt: 'backfilled question' }),
+        env: { HOME: ws },
+      });
+      assert.equal(onlySession(ws).first_prompt_preview, 'backfilled question');
+
+      await runPromptHook({
+        cwd: ws,
+        stdin: JSON.stringify({ session_id: FAKE_SID, cwd: ws, prompt: 'and a second turn' }),
+        env: { HOME: ws },
+      });
+
+      const events = readEvents(ws);
+      const progress = events.filter((e) => e.op === 'session_progress');
+      assert.equal(progress.length, 2);
+      assert.equal(progress[0].payload.first_prompt_preview, 'backfilled question');
+      assert.equal(progress[1].payload.first_prompt_preview, null);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
@@ -687,21 +834,119 @@ describe('UserPromptSubmit hook — promotion and heartbeat', () => {
     }
   });
 
-  // Invariant-false side: a heartbeat must never mint identity. A prompt for a
-  // session we have no record of is a race or an untracked workspace — writing
-  // anything would reintroduce orphan records through a different door.
-  it('a prompt for an unknown session mints NOTHING', async () => {
+  // -------------------------------------------------------------------------
+  // Losing the pending record must not lose the session.
+  //
+  // `lib/pending.mjs` promises twice over that a pending file is disposable:
+  // its design note says a lost one "degrades to exactly the pre-existing
+  // behaviour (the session gets recorded on its first prompt, with created_at
+  // set to that moment)", and PENDING_MAX_AGE_MS justifies a 24 h GC on that
+  // same basis. Both promises live or die by this hook recording a session it
+  // cannot find. It used to exit instead — and since the pending file stays
+  // gone, EVERY later prompt of that session exited too, so the session was
+  // never recorded anywhere. The three tests below are the three ways in.
+  // -------------------------------------------------------------------------
+
+  it('a prompt for an unknown session IS recorded (nothing staged, nothing known)', async () => {
     const ws = makeFakeWorkspace({ prefix: 'heartbeat-unknown-' });
     try {
       // No SessionStart ran, so there is neither a record nor a pending file.
+      // The cwd-gate has already established this workspace is tracked, and
+      // `recordSessionSeen` resolves any race with SessionStart under the
+      // projection lock, so "we have never heard of this session" is not a
+      // reason to drop a human prompt on the floor.
       const r = await runPromptHook({
         cwd: ws,
         stdin: JSON.stringify({ session_id: FAKE_SID, cwd: ws, prompt: 'orphan prompt' }),
         env: { HOME: ws },
       });
       assert.equal(r.code, 0, `stderr: ${r.stderr}`);
-      assert.equal(existsSync(eventsPath(ws)), false,
-        'an unknown session must not be minted from a prompt alone');
+
+      const events = readEvents(ws);
+      assert.equal(events.length, 1, 'the session must be recorded, not dropped');
+      assert.equal(events[0].op, 'session_seen');
+      assert.equal(events[0].payload.minted_from_prompt, true,
+        'the log should say which path produced the record');
+
+      const session = onlySession(ws);
+      assert.equal(session.first_prompt_preview, 'orphan prompt');
+      assert.ok(session.fingerprints.first_human_prompt_v1,
+        'the fingerprint is what keeps prune from treating this record as a ghost');
+      assert.deepEqual(session.claude_session_ids, [FAKE_SID]);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('the pending file being deleted does not lose the session', async () => {
+    const ws = makeFakeWorkspace({ prefix: 'pending-deleted-' });
+    try {
+      await runStartHook({
+        cwd: ws,
+        stdin: JSON.stringify({ session_id: FAKE_SID, cwd: ws }),
+        env: { HOME: ws },
+      });
+      const staged = join(pendingDirOf(ws), `${FAKE_SID}.json`);
+      assert.equal(existsSync(staged), true);
+      // Anything can do this: a cleaner, a user tidying the storage dir, a
+      // sync tool, `writePending` having silently failed in the first place.
+      rmSync(staged);
+
+      await runPromptHook({
+        cwd: ws,
+        stdin: JSON.stringify({ session_id: FAKE_SID, cwd: ws, prompt: 'still working here' }),
+        env: { HOME: ws },
+      });
+
+      const session = onlySession(ws);
+      assert.equal(session.first_prompt_preview, 'still working here');
+      // The documented degradation, and the only one: created_at is the first
+      // prompt rather than session start, because the observation that knew
+      // the start time is exactly what went missing.
+      assert.ok(session.created_at, 'created_at falls back to now');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('a pending record GC-d after 24h does not lose the session', async () => {
+    // "Leave the tab open on Friday, type on Monday". sweepPending reclaims
+    // the staged record at PENDING_MAX_AGE_MS and the next prompt arrives to
+    // find nothing staged — which is precisely the state the GC's own
+    // rationale assumes is harmless.
+    const ws = makeFakeWorkspace({ prefix: 'pending-gcd-' });
+    const OTHER_SID = 'bbbbbbbb-1111-2222-3333-444444444444';
+    try {
+      await runStartHook({
+        cwd: ws,
+        stdin: JSON.stringify({ session_id: FAKE_SID, cwd: ws }),
+        env: { HOME: ws },
+      });
+      const staged = join(pendingDirOf(ws), `${FAKE_SID}.json`);
+      assert.equal(existsSync(staged), true);
+
+      // Age it past PENDING_MAX_AGE_MS, then trigger the real GC the way
+      // production does — another SessionStart deferral.
+      const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      utimesSync(staged, old, old);
+      await runStartHook({
+        cwd: ws,
+        stdin: JSON.stringify({ session_id: OTHER_SID, cwd: ws }),
+        env: { HOME: ws },
+      });
+      assert.equal(existsSync(staged), false, 'sweepPending should have reclaimed it');
+
+      await runPromptHook({
+        cwd: ws,
+        stdin: JSON.stringify({ session_id: FAKE_SID, cwd: ws, prompt: 'monday morning' }),
+        env: { HOME: ws },
+      });
+
+      const sessions = readSessions(ws);
+      const ids = Object.keys(sessions);
+      assert.equal(ids.length, 1, 'the typed-into session must exist; the other must not');
+      assert.equal(sessions[ids[0]].first_prompt_preview, 'monday morning');
+      assert.deepEqual(sessions[ids[0]].claude_session_ids, [FAKE_SID]);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }

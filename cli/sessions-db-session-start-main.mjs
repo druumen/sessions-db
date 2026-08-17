@@ -212,7 +212,16 @@ async function main() {
     // Stage, GC, exit. No lock taken, no event appended, no projection write
     // — a warm-pool spawn now costs one small file instead of a full
     // read-modify-write cycle on the projection under contention.
-    writePending({
+    //
+    // The return value is load-bearing: deferral trades "record it now" for
+    // "the pending file will be promoted later", so a staged record that
+    // never reached disk is a session with nothing to promote AND nothing
+    // recorded. `writePending` swallows its errors by contract (full disk,
+    // read-only FS, EPERM on the storage dir all return false), so ignoring
+    // it turned every one of those into a silently unrecorded session. On
+    // failure we fall through to the eager path below — the pre-0.2.0
+    // behaviour, i.e. a ghost record at worst.
+    const staged = writePending({
       claude_session_id: claudeSessionId,
       observed_at: new Date().toISOString(),
       cwd,
@@ -225,14 +234,17 @@ async function main() {
       git_common_dir: gitCtx.gitCommonDir,
     }, recordTargetOpts);
 
-    // Opportunistic GC of pending records whose session never spoke. Bounded
-    // readdir, no lock; keeps the staging area self-limiting without a cron.
-    try {
-      sweepPending(recordTargetOpts);
-    } catch {
-      // best-effort — exit-0 contract
+    if (staged) {
+      // Opportunistic GC of pending records whose session never spoke.
+      // Bounded readdir, no lock; keeps the staging area self-limiting
+      // without a cron.
+      try {
+        sweepPending(recordTargetOpts);
+      } catch {
+        // best-effort — exit-0 contract
+      }
+      process.exit(0);
     }
-    process.exit(0);
   }
 
   // (9b) Privacy opt-out gate. The env var DRUUMEN_SESSIONS_DB_STORE_PREVIEW

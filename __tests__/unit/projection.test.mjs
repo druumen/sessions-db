@@ -886,5 +886,60 @@ describe('projection.mjs', () => {
       assert.equal(p.sessions[SID].first_prompt_preview, 'new');
       assert.equal(p.sessions[SID].created_at, TS_C);
     });
+
+    // -----------------------------------------------------------------------
+    // Version skew — a documented hazard, pinned so the documentation cannot
+    // quietly stop being true.
+    //
+    // The README used to claim that an older reader treats every new 0.2.0 op
+    // as a no-op. That is right for `session_progress` and WRONG for
+    // `session_prune`: `applyEvent` eagerly creates the session record before
+    // dispatching on the op, and only 0.2.0+ knows to delete it again. An
+    // older reducer therefore RESURRECTS every pruned record — dated to the
+    // tombstone's ts, so it also looks more recently active than it ever was
+    // — and `rebuild` persists that. Nothing detects it: `schema_version`
+    // stays 2 and no shipped reader compares it anyway.
+    //
+    // The stand-in below is `applyEvent` minus the two lines that make
+    // tombstones work, which is exactly what a pre-0.2.0 reducer is. If a
+    // future change makes tombstones survive an old reader, this test fails
+    // and the README's "Version skew" section needs rewriting with it.
+    // -----------------------------------------------------------------------
+    it('an old reducer (no prune case) resurrects the record — README "Version skew"', () => {
+      const preTombstoneApply = (projection, event) => {
+        const { op, stable_id: stableId, ts } = event;
+        let session = projection.sessions[stableId];
+        if (!session) {
+          session = emptySession(stableId, ts);
+          projection.sessions[stableId] = session;
+        }
+        if (op === 'session_seen') {
+          const p = event.payload ?? {};
+          if (p.claude_session_id) session.claude_session_ids.push(p.claude_session_id);
+          if (p.first_prompt_preview) session.first_prompt_preview = p.first_prompt_preview;
+        }
+        // No `case 'session_prune'`, and no `op !== 'session_prune'` guard —
+        // an unknown op falls through to the activity bump.
+        if (op !== 'sweep' && ts && (!session.last_progress_at || ts > session.last_progress_at)) {
+          session.last_progress_at = ts;
+        }
+        projection._meta.event_count += 1;
+        return projection;
+      };
+
+      const events = [
+        evt('session_seen', TS_A, { claude_session_id: 'csid-1', first_prompt_preview: 'real' }),
+        evt('session_prune', TS_D, { reason: 'ghost' }, 'b'),
+      ];
+
+      const current = rebuildFromEvents(events);
+      assert.equal(current.sessions[SID], undefined, 'the current reducer honours the tombstone');
+
+      const old = emptyProjection();
+      for (const e of events) preTombstoneApply(old, e);
+      assert.ok(old.sessions[SID], 'an old reducer brings the pruned record back');
+      assert.equal(old.sessions[SID].last_progress_at, TS_D,
+        'and dates it from the tombstone, i.e. more recent than it ever really was');
+    });
   });
 });

@@ -63,7 +63,7 @@ export function listTranscriptFiles(workspaceHash: string): string[];
  * `<session>/subagents/` (those are `agent-<hex>.jsonl`, never session ids).
  * Measured at ~35 dirs / ~300 files on a heavy machine.
  *
- * @param {string} claudeSessionId
+ * @param {string} claudeSessionId canonical UUID; anything else returns null
  * @returns {string|null} absolute path, or null when no directory holds it
  */
 export function findTranscriptByCsid(claudeSessionId: string): string | null;
@@ -81,18 +81,24 @@ export function findTranscriptByCsid(claudeSessionId: string): string | null;
  * pollute the index with ids that can never appear in `claude_session_ids[]`.
  *
  * Errors are swallowed per-directory: an unreadable workspace dir shrinks the
- * index rather than aborting the scan. Callers that treat "not in the index"
- * as "safe to delete" MUST pair this with a second, targeted existence check
- * (see `findTranscriptByCsid`) so a partial scan can never authorize a delete.
+ * index rather than aborting the scan. A caller that treats "not in the index"
+ * as "safe to delete" therefore MUST read `errors` and `fileCount` before
+ * acting: an empty index is indistinguishable from "nothing on disk", and a
+ * scan that failed outright still returns a well-formed empty result. See
+ * `assessScanTrust` in `lib/prune.mjs` — the consumer that learned this the
+ * hard way, and the reason `root` is reported back here (a wrong root, e.g.
+ * `sudo` giving us `/var/root/.claude/projects`, is the failure mode most
+ * likely to produce a silently empty scan).
  *
  * @returns {{ csids: Set<string>, dirCount: number, fileCount: number,
- *   errors: string[] }}
+ *   errors: string[], root: string }}
  */
 export function indexTranscriptCsids(): {
     csids: Set<string>;
     dirCount: number;
     fileCount: number;
     errors: string[];
+    root: string;
 };
 /**
  * Parse a single Claude Code transcript jsonl file and return its identity +

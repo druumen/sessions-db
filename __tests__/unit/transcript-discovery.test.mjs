@@ -134,6 +134,41 @@ describe('transcript.mjs — findTranscriptByCsid', () => {
       assert.equal(findTranscriptByCsid(undefined), null);
     });
   });
+
+  // Path-traversal gate, not input validation. The id is joined into
+  // `<root>/<dir>/<id>.jsonl`, so a caller passing `../../x` used to escape the
+  // projects root entirely and hand back an arbitrary file. The hook callers
+  // happen to validate first, but this function is exported from
+  // `lib/index.mjs` and its neighbour `pending.mjs` gates the identical input
+  // for the identical reason — an exported path builder cannot rely on its
+  // callers being careful.
+  it('rejects ids that are not canonical UUIDs, so nothing can escape the root', () => {
+    const root = mkTmp();
+    const outsideDir = join(root, 'outside');
+    const insideRoot = join(root, 'projects');
+    mkdirSync(join(insideRoot, '-Users-x-proj'), { recursive: true });
+    mkdirSync(outsideDir, { recursive: true });
+    // A real file the traversal would reach: <projects>/<dir>/../../outside/secret.jsonl
+    writeFileSync(join(outsideDir, 'secret.jsonl'), '{}\n');
+    try {
+      withProjectsRoot(insideRoot, () => {
+        assert.equal(findTranscriptByCsid('../outside/secret'), null);
+        assert.equal(findTranscriptByCsid('../../outside/secret'), null);
+        assert.equal(findTranscriptByCsid(`${CSID}/../../outside/secret`), null);
+        // Neighbouring shapes that are also not session ids.
+        assert.equal(findTranscriptByCsid('not-a-uuid'), null);
+        assert.equal(findTranscriptByCsid(`${CSID}x`), null);
+        // Positive control: the gate must not reject a real id.
+        writeFileSync(join(insideRoot, '-Users-x-proj', `${CSID}.jsonl`), '{}\n');
+        assert.equal(
+          findTranscriptByCsid(CSID),
+          join(insideRoot, '-Users-x-proj', `${CSID}.jsonl`),
+        );
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('transcript.mjs — indexTranscriptCsids', () => {
@@ -179,14 +214,32 @@ describe('transcript.mjs — indexTranscriptCsids', () => {
   it('a missing root yields an empty index plus a recorded error, never a throw', () => {
     // Callers treat "not in the index" as "no transcript", so a scan that
     // silently failed WITHOUT surfacing an error would be a licence to delete.
-    // The error channel is what lets prune stay honest about partial scans.
+    // The error channel is what lets prune stay honest about partial scans —
+    // and `assessScanTrust` (lib/prune.mjs) is the consumer that finally reads
+    // it. For a year nothing did.
     const missing = join(mkTmp(), 'nope');
     withProjectsRoot(missing, () => {
       const r = indexTranscriptCsids();
       assert.equal(r.csids.size, 0);
       assert.equal(r.dirCount, 0);
       assert.equal(r.errors.length, 1);
+      assert.equal(r.root, missing, 'the scanned root must be reported back');
     });
+  });
+
+  it('reports the root it scanned, so a wrong root is recognisable', () => {
+    // The failure this makes visible: `sudo`, cron and containers hand us a
+    // different HOME, so the scan reads /var/root/.claude/projects cleanly and
+    // finds nothing. Without the root in the result, the refusal message
+    // cannot say what actually went wrong.
+    const root = makeProjectsRoot({ '-Users-x-a': [`${CSID}.jsonl`] });
+    try {
+      withProjectsRoot(root, () => {
+        assert.equal(indexTranscriptCsids().root, root);
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

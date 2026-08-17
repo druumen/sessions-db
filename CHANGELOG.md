@@ -123,6 +123,114 @@ prompt; nothing else ever wrote, so `last_progress_at` stayed frozen at
   the recency guess. Both halves are pinned by tests, including a negative
   mutation run confirming the old heuristic fails them.
 
+- **`prune` refuses to delete when the transcript scan proved nothing.**
+  "No transcript on disk" is the ONLY criterion separating a real session
+  nobody ever resumed from a ghost — a record written by 0.1.7's `SessionStart`
+  has no preview, no fingerprint and no `ai_title` either. `indexTranscriptCsids`
+  returns a well-formed empty result on any failure (by design, for its other
+  callers) and nothing read its `errors` channel, so an empty scan silently
+  satisfied that criterion for every record. Measured against a copy of the
+  reference database (628 records): the real transcript root yielded 151
+  candidates, an existing-but-empty directory yielded 192, and a non-existent
+  directory also yielded 192 — the extra 41 in both cases were real sessions
+  with real human questions. `sudo sessions-db prune --yes` (HOME becomes
+  `/var/root`), a launchd/cron job, a container, a typo'd
+  `DRUUMEN_CLAUDE_PROJECTS_ROOT` or a macOS TCC blip all produce exactly that
+  scan. A real run now stops with an actionable message naming the root it
+  scanned; a dry run still reports but marks the scan untrusted (`disk_scan.trusted`,
+  and a warning above the candidate list). `--accept-untrusted-scan` is the
+  escape hatch for a machine that genuinely has no transcripts. New export:
+  `assessScanTrust`; `indexTranscriptCsids` now also returns the `root` it read.
+
+- **A prompt for a session with no pending record and no projection entry is
+  now recorded instead of dropped.** `lib/pending.mjs` states that losing a
+  pending file "degrades to exactly the pre-existing behaviour (the session
+  gets recorded on its first prompt, with `created_at` set to that moment)",
+  and `PENDING_MAX_AGE_MS` justifies its 24 h GC on that basis. Neither was
+  true: the prompt hook exited without writing when it found neither, and
+  since the pending file stays gone, every later prompt of that session exited
+  too — the session was never recorded anywhere. Two ordinary ways in: the
+  staged file failing to write or being removed, and a session left open for
+  more than 24 h before its first prompt ("open the tab Friday, type Monday").
+  The old objection — "either an untracked workspace or a race with
+  SessionStart" — does not hold: the cwd-gate has already run, and
+  `recordSessionSeen` reconciles races under the projection lock by csid index.
+  Such records carry `minted_from_prompt: true` in the event payload.
+
+- **`SessionStart` checks whether staging actually succeeded.** `writePending`
+  swallows its errors by contract (full disk, read-only FS, EPERM) and its
+  return value was ignored, so a failed staging deferred a session with
+  nothing on disk to promote. It now falls back to recording eagerly — the
+  pre-0.2.0 behaviour, i.e. a ghost at worst.
+
+- **The `.promoter` marker is now cross-examined once it goes stale.** The
+  30-day window is right for "is the hook configured?", but it left a 30-day
+  blind spot for the exact failure it exists to catch: removing the
+  `UserPromptSubmit` registration while staying on 0.2.0 kept a "fresh" marker,
+  so `SessionStart` deferred every session into a void for a month. A live
+  promoter refreshes the marker hourly, so a marker untouched for 6 h with at
+  least 3 sessions staged behind it (each ≥ 1 h old) is now treated as dead and
+  the marker is retired — retired rather than ignored, because the evidence
+  itself expires at `PENDING_MAX_AGE_MS` and the answer would otherwise
+  oscillate. Self-healing: the next real prompt-hook run recreates it. Ghost
+  stagings from before the marker went quiet do not count, so a healthy
+  machine's warm-pool records cannot trip it.
+
+- **The per-turn heartbeat no longer logs a preview of every prompt.**
+  `session_progress` carried `first_prompt_preview` on every turn; the reducer
+  discards all but the first (first-write-wins), so the only effect was
+  persisting a 200-character excerpt of every prompt into the append-only log.
+  Before 0.2.0 only the first prompt of a *resumed* session was ever stored, so
+  this was an unannounced widening of what lands on disk. The preview is now
+  sent only when the record does not have one yet — which still covers the case
+  it exists for (a session that predates this hook).
+
+- **`UserPromptSubmit` no longer anchors storage on an arbitrary cwd.**
+  `gitContextFast` collapses every non-zero git exit into `not_a_repo` +
+  `worktreePath: null`, and that includes `fatal: detected dubious ownership`
+  on shared/mounted checkouts. The hook then fell back to `workspaceRoot = cwd`
+  and created a second database wherever the user happened to be — reproduced
+  as a stray `packages/deep/app/tickets/_logs/sessions-db-pending/.promoter`
+  appearing in `git status`. Without a worktree root it now proceeds only when
+  the target is already an established storage root (explicit
+  `DRUUMEN_SESSIONS_DB_ROOT`, or a cwd that holds the database), and otherwise
+  bails like `SessionStart` does.
+
+- **`sanitizeFirstPrompt` no longer materialises the whole prompt** to produce
+  200 characters. `Array.from(s)` allocated one array element per code point:
+  a 32 MB single-line paste cost ~442 ms and ~328 MB of heap, and the hook that
+  now calls it runs on every turn inside a 1 s ceiling, synchronously, on raw
+  pasted input (measured 1994 ms end-to-end for that paste). It slices to
+  `maxLen * 4` code units first. Output is byte-identical — pinned against the
+  previous implementation across surrogate-pair boundaries — so
+  `first_human_prompt_v1` fingerprints written before and after this change
+  still match.
+
+- **`findTranscriptByCsid` validates its id before joining it into a path.**
+  It is exported from `lib/index.mjs` and interpolates the id into
+  `<root>/<dir>/<id>.jsonl`; `findTranscriptByCsid('../../secret')` escaped the
+  projects root. Not reachable through the hooks (they validate first), and its
+  neighbour in `pending.mjs` already gated the identical input for the
+  identical reason.
+
+- **Documented that the hook time budgets bound async stalls only.** An unref'd
+  timer cannot preempt a blocked event loop, so synchronous IO on a wedged
+  mount (NFS / SMB / sshfs / FUSE) runs straight past the 1 s / 2 s ceilings —
+  reproduced by making the cwd-gate's `CLAUDE.md` a FIFO with no writer, where
+  the process ran to SIGKILL and the timer never fired. The docstrings said
+  "hard timeout"; they now say what is actually guaranteed.
+
+- **Documented the `session_prune` version-skew hazard** (README, "Version
+  skew"). The claim that an older reader treats the new ops as no-ops is right
+  for `session_progress` and wrong for `session_prune`: `applyEvent` creates
+  the session record before dispatching on the op, so a pre-0.2.0 reducer
+  resurrects every pruned record — dated to the tombstone's timestamp — and
+  `npx @druumen/sessions-db@0.1.7 rebuild` persists that silently.
+  `schema_version` stays `2` because no shipped reader compares it (a bump
+  would change no behaviour while breaking the typed contract and the
+  documented 0.4.0 migration); the hazard is documented and pinned by a test
+  instead.
+
 ### Hook registration
 
 `UserPromptSubmit` must be registered separately — installing 0.2.0 does not
@@ -144,11 +252,12 @@ entry:
 **Upgrading without registering it is safe but pointless.** Deferral is gated on
 promoter liveness: `SessionStart` defers only when it can see that the prompt
 hook has actually run against this storage root (the `.promoter` marker, valid
-30 days). On a machine where only `SessionStart` is registered, nothing ever
-writes that marker, so the hook keeps its pre-0.2.0 always-record behaviour —
-ghosts continue to accumulate, but no session is ever lost. The failure mode
-this avoids is the dangerous one: deferring into a void and silently recording
-nothing at all.
+30 days, and discredited earlier than that if sessions pile up unpromoted
+behind a stale one — see "Fixed"). On a machine where only `SessionStart` is
+registered, nothing ever writes that marker, so the hook keeps its pre-0.2.0
+always-record behaviour — ghosts continue to accumulate, but no session is ever
+lost. The failure mode this avoids is the dangerous one: deferring into a void
+and silently recording nothing at all.
 
 Consequence worth knowing: the first session in a given storage root after
 installing is recorded eagerly, because no promoter has announced itself yet.

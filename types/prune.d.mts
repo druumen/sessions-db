@@ -11,13 +11,69 @@
  */
 export function parseDuration(text: string): number | null;
 /**
+ * Is a transcript scan trustworthy enough to authorise a delete?
+ *
+ * ## Why this gate exists
+ *
+ * Criterion (4) — "no transcript on disk" — is the ONLY criterion that
+ * distinguishes a real session nobody ever resumed from a ghost: a record
+ * written by 0.1.7's SessionStart has no preview, no fingerprint and no
+ * ai_title either, exactly like a warm-pool spawn. So the disk scan is not a
+ * heuristic here, it is the evidence. When the scan returns nothing, criterion
+ * (4) is satisfied by EVERY record, and prune degenerates into "delete every
+ * session that was never resumed".
+ *
+ * `indexTranscriptCsids()` cannot fail loudly — it returns a well-formed empty
+ * result on any error, by design, because its other callers want tolerance.
+ * Measured against a copy of the reference database (628 records) with three
+ * different transcript roots:
+ *
+ *   real root (35 dirs / 308 files) ...... 151 candidates
+ *   an existing but EMPTY directory ...... 192 candidates  (errors: [])
+ *   a non-existent directory ............. 192 candidates  (errors: [ENOENT])
+ *
+ * The extra 41 in both broken cases all carried a real human question. The
+ * triggers are mundane: `sudo sessions-db prune --yes` (HOME becomes
+ * /var/root), a launchd/cron job with a minimal environment, a container, a
+ * typo in `DRUUMEN_CLAUDE_PROJECTS_ROOT`, or macOS TCC denying access to
+ * `~/.claude` for one run.
+ *
+ * The targeted fallback in `hasTranscriptOnDisk` does NOT cover this: it
+ * derives its path from the same root, so it fails identically.
+ *
+ * The module already applies the right principle one criterion earlier —
+ * an unparseable `created_at` spares the record, because "cannot verify" must
+ * never resolve to "delete". This is that same rule applied to the disk scan,
+ * which is where it actually mattered.
+ *
+ * @param {{ errors?: string[], fileCount?: number, dirCount?: number,
+ *   root?: string }} scan result of `indexTranscriptCsids()`
+ * @returns {{ trusted: boolean, reasons: string[] }} machine-readable reasons:
+ *   `scan_errors` (the scan reported at least one unreadable path) and
+ *   `empty_scan` (zero transcripts found anywhere).
+ */
+export function assessScanTrust(scan: {
+    errors?: string[];
+    fileCount?: number;
+    dirCount?: number;
+    root?: string;
+}): {
+    trusted: boolean;
+    reasons: string[];
+};
+/**
  * Second, targeted disk check for one record.
  *
  * `indexTranscriptCsids()` swallows per-directory read errors, so a
  * permission blip could shrink the index and make a live session look
- * transcript-less. This is the "双保险" second net the design calls for: for
- * every csid we ALSO compute the canonical path from the record's own cwd and
- * stat it directly. A hit from either path spares the record.
+ * transcript-less. For every csid we ALSO compute the canonical path from the
+ * record's own cwd and stat it directly. A hit from either path spares the
+ * record.
+ *
+ * ⚠ Scope: this only covers ONE unreadable workspace directory. It reads the
+ * SAME projects root as the index, so it is worthless when the root itself is
+ * wrong, empty or unreadable — that class is handled by `assessScanTrust`,
+ * which refuses the delete outright rather than trying to compensate.
  *
  * @param {object} session
  * @param {Set<string>} diskCsids
@@ -78,11 +134,17 @@ export function computePruneCandidates(projection: object, opts?: {
  * so a crash mid-batch leaves a durable log that the next rebuild folds into
  * exactly the same result.
  *
+ * Scan trust: a real run REFUSES when the transcript scan is not trustworthy
+ * (see `assessScanTrust`) unless the caller passes `acceptUntrustedScan`. A
+ * dry run still runs — reporting is not destructive — but carries
+ * `disk_scan.trusted: false` so the caller can say so loudly.
+ *
  * @param {{
  *   dryRun?: boolean,
  *   olderThanMs?: number,
  *   now?: number,
  *   reason?: string,
+ *   acceptUntrustedScan?: boolean,
  *   rootPath?: string, root?: string, paths?: object,
  *   lockTimeoutMs?: number, lockRetryMs?: number,
  * }} [opts]
@@ -93,6 +155,7 @@ export function runPrune(opts?: {
     olderThanMs?: number;
     now?: number;
     reason?: string;
+    acceptUntrustedScan?: boolean;
     rootPath?: string;
     root?: string;
     paths?: object;

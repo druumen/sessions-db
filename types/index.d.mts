@@ -5,8 +5,8 @@ export { setAlias, linkTask, unlinkTask, setParent, closeSession, runSweep } fro
 export { resolveStoragePaths, pathsFromRoot, STORAGE_FILENAMES, MAX_ASCEND_DEPTH } from "./paths.mjs";
 export { resolveIdentity, findByClaudeSessionId, findByTranscriptLineage, scanFingerprintCandidates, collectParentCandidates, capParentCandidates, classifyCorroborators, meetsThreshold, MAX_PARENT_CANDIDATES, STRONG_CORROBORATORS, WEAK_CORROBORATORS } from "./identity.mjs";
 export { computeSweepTransitions, computeEffectiveLastProgress } from "./sweep.mjs";
-export { runPrune, computePruneCandidates, hasTranscriptOnDisk, parseDuration, DEFAULT_OLDER_THAN_MS } from "./prune.mjs";
-export { pendingDir, pendingPath, writePending, readPending, deletePending, listPending, sweepPending, markPromoterAlive, isPromoterAlive, PENDING_DIRNAME, PENDING_MAX_AGE_MS, PROMOTER_MARKER, PROMOTER_MAX_AGE_MS } from "./pending.mjs";
+export { runPrune, computePruneCandidates, hasTranscriptOnDisk, assessScanTrust, parseDuration, DEFAULT_OLDER_THAN_MS } from "./prune.mjs";
+export { pendingDir, pendingPath, writePending, readPending, deletePending, listPending, sweepPending, markPromoterAlive, isPromoterAlive, PENDING_DIRNAME, PENDING_MAX_AGE_MS, PROMOTER_MARKER, PROMOTER_MAX_AGE_MS, PROMOTER_STALE_AFTER_MS, PROMOTER_BACKLOG_MIN_COUNT, PROMOTER_BACKLOG_MIN_AGE_MS } from "./pending.mjs";
 export { workspaceHashFromCwd, listTranscriptFiles, findTranscriptByCsid, indexTranscriptCsids } from "./transcript.mjs";
 export { sanitizeFirstPrompt, stripIdeWrappers, stripSystemReminders } from "./sanitize.mjs";
 export { generateSessionId, isSessionId, extractTimestamp } from "./uuid.mjs";

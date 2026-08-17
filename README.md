@@ -100,6 +100,15 @@ sessions-db prune                              # report never-used sessions (DRY
 sessions-db prune --yes                        # actually remove them
 ```
 
+`prune` refuses to delete when its scan of `~/.claude/projects` comes back
+empty or reports an error, and names the root it read. That scan is the
+only criterion distinguishing a real session nobody resumed from a ghost,
+so an empty one would make every never-resumed session look prunable —
+the realistic causes are `sudo` / cron / containers changing `HOME`, or a
+typo'd `DRUUMEN_CLAUDE_PROJECTS_ROOT`. A dry run still reports, flagged
+`disk_scan.trusted: false`. `--accept-untrusted-scan` overrides the
+refusal for a machine that genuinely holds no transcripts.
+
 The CLI is the same surface as the library API; both write through the
 same primitives, so a workflow that mixes hook-driven CLI commands with
 programmatic library calls observes a consistent projection.
@@ -267,10 +276,39 @@ events — useful after manual events-log inspection / surgery.
 `schema_version: 2` is still the contract in 0.2.0 — the release adds
 event ops (`session_progress`, `session_prune`) and honours a new
 optional `created_at` payload field, but removes and repurposes nothing.
-An older reader folding a 0.2.0 log tolerates the new ops as unknown
-(they no-op while still counting toward `event_count`), so the only
-consequence of a version skew is that an old reader does not see progress
-updates or honour tombstones.
+
+### Version skew: an old reader RESURRECTS pruned records
+
+An older reader folding a 0.2.0 log tolerates `session_progress` as an
+unknown op (no-op, still counted toward `event_count`). `session_prune`
+is different, and calling it a no-op would be wrong: the reducer creates
+the session record for *any* op before dispatching on it, and only
+0.2.0+ knows to delete it again. Folding a pruned log with a pre-0.2.0
+reducer therefore brings every tombstoned record back — with
+`last_progress_at` set to the tombstone's timestamp, i.e. looking *more*
+recently active than it ever was.
+
+That is harmless for a read-only reader, but `rebuild` **saves**:
+
+```bash
+npx @druumen/sessions-db@0.1.7 rebuild   # silently un-prunes every record
+```
+
+There is no version guard to catch this — `schema_version` is written
+but nothing gates on it, and it stays `2` either way. So:
+
+- **Do not run an older version's `rebuild`** against a database that has
+  been pruned. Pin one version per machine (`npx -y @druumen/sessions-db@0.2.0`,
+  or a local install) rather than mixing.
+- If it happens, it is recoverable: re-run `sessions-db prune --yes` with
+  a current version. The tombstones are still in `events.jsonl` — the
+  original observations are never rewritten — but a fresh prune is what
+  reconciles the projection, and the resurrected records will have to
+  clear the criteria again.
+- `schema_version` was deliberately **not** bumped for this: nothing in
+  any shipped reader compares it, so a bump would break the typed
+  `schema_version: 2` contract and the documented 0.4.0 migration plan
+  while changing no behaviour. Documenting the skew is the honest fix.
 
 The pending area (`sessions-db-pending/`) is deliberately NOT part of the
 schema: it is a staging buffer of throwaway files, safe to delete at any

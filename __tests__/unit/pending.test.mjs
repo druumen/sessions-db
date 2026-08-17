@@ -30,6 +30,8 @@ import {
   PENDING_MAX_AGE_MS,
   PROMOTER_MARKER,
   PROMOTER_MAX_AGE_MS,
+  PROMOTER_BACKLOG_MIN_AGE_MS,
+  PROMOTER_BACKLOG_MIN_COUNT,
 } from '../../lib/pending.mjs';
 
 function mkTmp(prefix = 'pending-test-') {
@@ -491,6 +493,159 @@ describe('pending.mjs', () => {
         const listed = listPending(opts);
         assert.equal(listed.length, 1);
         assert.equal(listed[0].claude_session_id, CSID_A);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    // -----------------------------------------------------------------------
+    // Secondary liveness signal.
+    //
+    // The 30-day window answers "is the hook configured?" — but a user who
+    // REMOVES the UserPromptSubmit registration while staying on 0.2.0 keeps a
+    // marker that is fresh by that standard for a month, so SessionStart keeps
+    // deferring into a void: every session staged, every staged record expired
+    // at PENDING_MAX_AGE_MS, nothing recorded. That is the exact failure the
+    // marker exists to prevent, with a 30-day blind window in front of it.
+    //
+    // The cross-check: a live promoter refreshes the marker hourly, so a stale
+    // marker with sessions piling up BEHIND it is a backlog nobody is draining.
+    // The tests below pin both directions, because the false-positive side
+    // matters too — a healthy machine's warm-pool ghosts are unpromoted
+    // stagings in normal operation and must not trip it.
+    // -----------------------------------------------------------------------
+
+    /** Stage `n` pending records and set each one's mtime to `ageMs` ago. */
+    function stageAged(opts, n, ageMs, now = Date.now()) {
+      for (let i = 0; i < n; i++) {
+        const csid = `aaaaaaaa-0000-4000-8000-00000000000${i}`;
+        writePending({ claude_session_id: csid, observed_at: new Date().toISOString() }, opts);
+        const t = (now - ageMs) / 1000;
+        utimesSync(join(pendingDir(opts), `${csid}.json`), t, t);
+      }
+    }
+
+    /** Backdate the marker to `ageMs` ago. */
+    function ageMarker(opts, ageMs, now = Date.now()) {
+      const marker = join(pendingDir(opts), PROMOTER_MARKER);
+      const t = (now - ageMs) / 1000;
+      utimesSync(marker, t, t);
+      return marker;
+    }
+
+    it('a stale marker alone is still trusted (staleness is not the signal)', () => {
+      // Somebody who does not open this workspace for a day must not have
+      // deferral switch off underneath them — that is the whole reason the
+      // marker window is 30 days.
+      const dir = mkTmp();
+      const opts = { rootPath: dir };
+      const now = Date.now();
+      try {
+        markPromoterAlive(opts);
+        ageMarker(opts, 8 * 60 * 60 * 1000, now);
+        assert.equal(isPromoterAlive(opts, { now }), true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('a stale marker plus an unpromoted backlog is NOT trusted, and retires the marker', () => {
+      const dir = mkTmp();
+      const opts = { rootPath: dir };
+      const now = Date.now();
+      try {
+        markPromoterAlive(opts);
+        const marker = ageMarker(opts, 8 * 60 * 60 * 1000, now);
+        // Staged after the marker went quiet, and old enough that a live
+        // promoter would have drained them.
+        stageAged(opts, PROMOTER_BACKLOG_MIN_COUNT, 2 * 60 * 60 * 1000, now);
+
+        assert.equal(isPromoterAlive(opts, { now }), false);
+        // Retired rather than merely ignored: the evidence (the backlog) is
+        // itself GC'd at PENDING_MAX_AGE_MS, so leaving the marker in place
+        // would make the answer flip back to "alive" a day later and start
+        // losing sessions again on a machine that never fixed anything.
+        assert.equal(existsSync(marker), false, 'the discredited marker must be retired');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('the retirement is self-healing: one real promoter run restores trust', () => {
+      const dir = mkTmp();
+      const opts = { rootPath: dir };
+      const now = Date.now();
+      try {
+        markPromoterAlive(opts);
+        ageMarker(opts, 8 * 60 * 60 * 1000, now);
+        stageAged(opts, PROMOTER_BACKLOG_MIN_COUNT, 2 * 60 * 60 * 1000, now);
+        assert.equal(isPromoterAlive(opts, { now }), false);
+
+        // The prompt hook running once — i.e. the user re-registered it.
+        assert.equal(markPromoterAlive(opts), true);
+        assert.equal(isPromoterAlive(opts), true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('ghosts staged BEFORE the marker do not discredit it', () => {
+      // False-positive guard. Warm-pool spawns are staged and never promoted
+      // in normal operation, so their existence proves nothing; what would
+      // prove something is that they accumulated while no promoter ran.
+      const dir = mkTmp();
+      const opts = { rootPath: dir };
+      const now = Date.now();
+      try {
+        markPromoterAlive(opts);
+        stageAged(opts, PROMOTER_BACKLOG_MIN_COUNT + 2, 20 * 60 * 60 * 1000, now);
+        ageMarker(opts, 8 * 60 * 60 * 1000, now);
+        assert.equal(isPromoterAlive(opts, { now }), true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('a backlog younger than the grace period does not discredit the marker', () => {
+      // A record staged minutes ago may be promoted the second the user types.
+      const dir = mkTmp();
+      const opts = { rootPath: dir };
+      const now = Date.now();
+      try {
+        markPromoterAlive(opts);
+        ageMarker(opts, 8 * 60 * 60 * 1000, now);
+        stageAged(opts, PROMOTER_BACKLOG_MIN_COUNT + 2, PROMOTER_BACKLOG_MIN_AGE_MS / 2, now);
+        assert.equal(isPromoterAlive(opts, { now }), true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('fewer staged records than the threshold does not discredit the marker', () => {
+      const dir = mkTmp();
+      const opts = { rootPath: dir };
+      const now = Date.now();
+      try {
+        markPromoterAlive(opts);
+        ageMarker(opts, 8 * 60 * 60 * 1000, now);
+        stageAged(opts, PROMOTER_BACKLOG_MIN_COUNT - 1, 2 * 60 * 60 * 1000, now);
+        assert.equal(isPromoterAlive(opts, { now }), true);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('a fresh marker is trusted no matter how large the backlog is', () => {
+      // The steady state, and the fast path: a promoter that ran within the
+      // hour is alive by direct evidence, so the backlog is not even read.
+      const dir = mkTmp();
+      const opts = { rootPath: dir };
+      const now = Date.now();
+      try {
+        markPromoterAlive(opts);
+        stageAged(opts, PROMOTER_BACKLOG_MIN_COUNT + 5, 5 * 60 * 60 * 1000, now);
+        assert.equal(isPromoterAlive(opts, { now }), true);
+        assert.equal(existsSync(join(pendingDir(opts), PROMOTER_MARKER)), true);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

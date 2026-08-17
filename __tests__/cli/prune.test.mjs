@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import * as pruneMod from '../../cli/prune.mjs';
 import * as rebuildMod from '../../cli/rebuild.mjs';
 import { emptySession } from '../../lib/projection.mjs';
-import { DEFAULT_OLDER_THAN_MS } from '../../lib/prune.mjs';
+import { assessScanTrust, DEFAULT_OLDER_THAN_MS } from '../../lib/prune.mjs';
 import { loadProjection, newEvent } from '../../lib/storage.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
@@ -162,17 +162,31 @@ async function runHandler(mod, argv) {
 // suite happens to have open in Claude Code right now — different on every
 // laptop, different on CI, different five minutes from now. Pointing
 // DRUUMEN_CLAUDE_PROJECTS_ROOT (re-read on every call — see
-// claudeProjectsRoot() in lib/transcript.mjs) at an empty tmpdir before ANY
-// prune invocation makes "no transcript on disk" true by construction
-// instead of true by accident. One test below (the "transcript on disk"
-// disqualifier) deliberately swaps this to a second, non-empty root for the
-// duration of a single call and restores it immediately after.
+// claudeProjectsRoot() in lib/transcript.mjs) at a controlled tmpdir before
+// ANY prune invocation makes "no transcript on disk" true by construction
+// instead of true by accident. Two tests below deliberately swap this for the
+// duration of a single call (a root that DOES hold the record's transcript;
+// an empty / missing root) and restore it immediately after.
+//
+// The root holds one decoy transcript belonging to no fixture session. That
+// is not decoration: since the scan-trust gate (lib/prune.mjs
+// `assessScanTrust`), a scan that finds ZERO transcripts refuses to delete,
+// because an empty scan cannot tell a ghost from a real session that was
+// never resumed. A completely empty root would therefore make every --yes
+// test in this file exercise the refusal instead of the prune. One unrelated
+// file makes the scan trustworthy while leaving every fixture ghost exactly
+// as transcript-less as before.
 // ---------------------------------------------------------------------------
+const DECOY_CSID = 'decoy-11111111-2222-3333-4444-555555555555';
+
 let EMPTY_PROJECTS_ROOT;
 let PREV_PROJECTS_ROOT_ENV;
 
 before(() => {
   EMPTY_PROJECTS_ROOT = mkdtempSync(join(tmpdir(), 'sessions-db-cli-prune-empty-projects-'));
+  const decoyDir = join(EMPTY_PROJECTS_ROOT, '-Users-x-unrelated-workspace');
+  mkdirSync(decoyDir, { recursive: true });
+  writeFileSync(join(decoyDir, `${DECOY_CSID}.jsonl`), '{"type":"user"}\n');
   PREV_PROJECTS_ROOT_ENV = process.env.DRUUMEN_CLAUDE_PROJECTS_ROOT;
   process.env.DRUUMEN_CLAUDE_PROJECTS_ROOT = EMPTY_PROJECTS_ROOT;
 });
@@ -262,6 +276,193 @@ describe('prune handler — dry-run-by-default safety posture', () => {
       assert.equal(readFileSync(projectionPath(root), 'utf8'), beforeBytes);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scan trust — the second safety inversion.
+//
+// "No transcript on disk" is the ONLY criterion that separates a real session
+// nobody ever resumed from a ghost: a record written by 0.1.7's SessionStart
+// has no preview, no fingerprint and no ai_title either. So when the scan
+// comes back empty, that criterion is satisfied by every record, and prune
+// stops being "remove ghosts" and becomes "remove everything nobody resumed".
+//
+// Measured on a copy of the reference database (628 records): the real
+// transcript root produced 151 candidates, an empty directory produced 192,
+// and a non-existent directory also produced 192. The extra 41 in both broken
+// cases were real sessions with real human questions in them. `sudo`, cron,
+// containers and a typo'd DRUUMEN_CLAUDE_PROJECTS_ROOT all produce exactly
+// that scan.
+//
+// The tests below run the invariant-false side deliberately: each one plants
+// a record that IS a ghost by every other criterion, so if the gate is
+// removed they go green by deleting it.
+// ---------------------------------------------------------------------------
+
+/** Point the transcript scan at `root` for the duration of one call. */
+async function withProjectsRoot(root, fn) {
+  process.env.DRUUMEN_CLAUDE_PROJECTS_ROOT = root;
+  try {
+    return await fn();
+  } finally {
+    process.env.DRUUMEN_CLAUDE_PROJECTS_ROOT = EMPTY_PROJECTS_ROOT;
+  }
+}
+
+describe('prune handler — refuses to delete on an untrusted transcript scan', () => {
+  it('--yes with a scan that found nothing: refuses, writes nothing, deletes nothing', async () => {
+    const root = mkTmp();
+    const noTranscripts = mkdtempSync(join(tmpdir(), 'sessions-db-prune-no-transcripts-'));
+    try {
+      plantProjection(root, [mkGhost(SID_A)]);
+      const beforeBytes = readFileSync(projectionPath(root), 'utf8');
+
+      const r = await withProjectsRoot(noTranscripts, () =>
+        runHandler(pruneMod, ['--root', root, '--yes']));
+
+      assert.equal(r.exitCode, 1);
+      assert.match(r.stderr, /refusing to prune/);
+      // The message has to be actionable: name the root that was scanned,
+      // because every realistic cause (sudo, cron, container, typo'd env var)
+      // is recognised the moment the operator reads which root it looked at.
+      assert.ok(r.stderr.includes(noTranscripts), `stderr should name the scanned root: ${r.stderr}`);
+
+      assert.equal(eventsLines(root).length, 0, 'refusal must not append a tombstone');
+      assert.equal(readFileSync(projectionPath(root), 'utf8'), beforeBytes);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(noTranscripts, { recursive: true, force: true });
+    }
+  });
+
+  it('--yes with a scan that ERRORED (missing root): refuses too', async () => {
+    // The ENOENT case is the one the old code walked straight past: the error
+    // was recorded in scan.errors and no consumer ever read it. Both shapes
+    // — silently empty and loudly failed — must reach the same refusal.
+    const root = mkTmp();
+    const missing = join(mkTmp(), 'does-not-exist');
+    try {
+      plantProjection(root, [mkGhost(SID_A)]);
+      const r = await withProjectsRoot(missing, () =>
+        runHandler(pruneMod, ['--root', root, '--json', '--yes']));
+
+      assert.equal(r.exitCode, 1);
+      const parsed = JSON.parse(r.stdout);
+      assert.equal(parsed.ok, false);
+      assert.equal(parsed.refused, true);
+      assert.equal(parsed.disk_scan.trusted, false);
+      assert.ok(parsed.disk_scan.untrusted_reasons.includes('scan_errors'));
+      assert.equal(eventsLines(root).length, 0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('dry-run still reports, but flags the scan as untrusted', async () => {
+    // Reporting is not destructive, so the dry run keeps working — but the
+    // list it prints is meaningless, and saying so is the whole point.
+    const root = mkTmp();
+    const noTranscripts = mkdtempSync(join(tmpdir(), 'sessions-db-prune-no-transcripts-'));
+    try {
+      plantProjection(root, [mkGhost(SID_A)]);
+
+      const asJson = await withProjectsRoot(noTranscripts, () =>
+        runHandler(pruneMod, ['--root', root, '--json']));
+      assert.equal(asJson.exitCode, 0, asJson.stderr);
+      const parsed = JSON.parse(asJson.stdout);
+      assert.equal(parsed.disk_scan.trusted, false);
+      assert.deepEqual(parsed.disk_scan.untrusted_reasons, ['empty_scan']);
+      assert.equal(parsed.disk_scan.root, noTranscripts);
+
+      const asText = await withProjectsRoot(noTranscripts, () =>
+        runHandler(pruneMod, ['--root', root]));
+      assert.equal(asText.exitCode, 0, asText.stderr);
+      assert.match(asText.stdout, /TRANSCRIPT SCAN NOT TRUSTWORTHY/);
+      // Warning first, list second — a warning under a list of stable_ids is
+      // a warning nobody reads.
+      assert.ok(
+        asText.stdout.indexOf('NOT TRUSTWORTHY') < asText.stdout.indexOf(SID_A),
+        'the warning must precede the candidate list',
+      );
+      // And it must not close by recommending a command that will refuse.
+      assert.doesNotMatch(asText.stdout, /Re-run with --yes to remove them/);
+      assert.match(asText.stdout, /Fix the transcript scan/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(noTranscripts, { recursive: true, force: true });
+    }
+  });
+
+  it('--accept-untrusted-scan is the escape hatch: prunes anyway, still warns', async () => {
+    // A machine really can have no transcripts (fresh container, transcripts
+    // rotated away wholesale). The gate exists to make that an explicit
+    // statement rather than an accident, not to make it impossible.
+    const root = mkTmp();
+    const noTranscripts = mkdtempSync(join(tmpdir(), 'sessions-db-prune-no-transcripts-'));
+    try {
+      plantProjection(root, [mkGhost(SID_A)]);
+      const r = await withProjectsRoot(noTranscripts, () =>
+        runHandler(pruneMod, ['--root', root, '--yes', '--accept-untrusted-scan']));
+
+      assert.equal(r.exitCode, 0, r.stderr);
+      assert.match(r.stdout, /TRANSCRIPT SCAN NOT TRUSTWORTHY/);
+      assert.match(r.stdout, /1 ghost record removed/);
+      const events = eventsLines(root);
+      assert.equal(events.length, 1);
+      assert.equal(events[0].op, 'session_prune');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(noTranscripts, { recursive: true, force: true });
+    }
+  });
+
+  it('a trusted scan is not flagged (positive control)', async () => {
+    // Without this, every assertion above would still pass if the gate were
+    // wired to "always untrusted".
+    const root = mkTmp();
+    try {
+      plantProjection(root, [mkGhost(SID_A)]);
+      const r = await runHandler(pruneMod, ['--root', root, '--json']);
+      assert.equal(r.exitCode, 0, r.stderr);
+      const parsed = JSON.parse(r.stdout);
+      assert.equal(parsed.disk_scan.trusted, true);
+      assert.deepEqual(parsed.disk_scan.untrusted_reasons, []);
+      assert.equal(parsed.count, 1, 'the ghost is still a candidate under a trusted scan');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('assessScanTrust (lib/prune.mjs)', () => {
+  it('a scan with files and no errors is trusted', () => {
+    assert.deepEqual(
+      assessScanTrust({ dirCount: 3, fileCount: 12, errors: [], root: '/x' }),
+      { trusted: true, reasons: [] },
+    );
+  });
+
+  it('zero files is untrusted even when the scan reported no error', () => {
+    // The nastier of the two failure modes: an existing but wrong directory
+    // (sudo's /var/root/.claude/projects) reads cleanly and returns nothing.
+    const t = assessScanTrust({ dirCount: 0, fileCount: 0, errors: [], root: '/x' });
+    assert.equal(t.trusted, false);
+    assert.deepEqual(t.reasons, ['empty_scan']);
+  });
+
+  it('any error is untrusted even when files were still found', () => {
+    // A partial scan can drop exactly the directory holding the transcripts
+    // of the records we are about to delete.
+    const t = assessScanTrust({ dirCount: 3, fileCount: 12, errors: ['readdir(a): EACCES'] });
+    assert.equal(t.trusted, false);
+    assert.deepEqual(t.reasons, ['scan_errors']);
+  });
+
+  it('a malformed scan object is untrusted, not trusted-by-default', () => {
+    for (const bad of [undefined, null, {}, { fileCount: 'lots' }]) {
+      assert.equal(assessScanTrust(bad).trusted, false, `${JSON.stringify(bad)} must not be trusted`);
     }
   });
 });

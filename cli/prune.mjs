@@ -18,6 +18,12 @@
  * `session_prune` tombstone and let the reducer drop the record. events.jsonl
  * is never rewritten, so the original observations remain readable and a
  * `rebuild` reproduces exactly the same pruned state.
+ *
+ * Second inversion, same reasoning: a delete is refused outright when the
+ * transcript scan is not trustworthy (empty result or read errors — see
+ * `assessScanTrust` in lib/prune.mjs). Every other subcommand degrades
+ * gracefully when the disk disagrees with it; this one stops, because the
+ * scan IS the evidence that a record is a ghost.
  */
 
 import { parseDuration, runPrune, DEFAULT_OLDER_THAN_MS } from '../lib/prune.mjs';
@@ -34,6 +40,7 @@ const SPEC = {
     '--json': { type: 'boolean' },
     '--root': { type: 'string' },
     '--quiet': { type: 'boolean' },
+    '--accept-untrusted-scan': { type: 'boolean' },
   },
 };
 
@@ -48,7 +55,10 @@ export const HELP = formatHelp({
     '  - ai_title is empty                    (no conversation to title)\n' +
     '  - no transcript on disk for any of its claude_session_ids\n' +
     '  - created_at older than --older-than   (default 1h)\n' +
-    '  - no alias / parent / child / task / project link, outcome still open',
+    '  - no alias / parent / child / task / project link, outcome still open\n\n' +
+    'Refuses to delete when the transcript scan finds nothing or reports an\n' +
+    'error — that scan is the only criterion telling a real never-resumed\n' +
+    'session apart from a ghost.',
   flags: [
     { name: '--yes',              desc: 'actually prune (without this, the command only reports)' },
     { name: '--dry-run',          desc: 'force report-only (the default; explicit for scripts)' },
@@ -57,6 +67,10 @@ export const HELP = formatHelp({
     { name: '--json',             desc: 'JSON output (machine-readable)' },
     { name: '--root <p>',         desc: 'override storage root (default cwd)' },
     { name: '--quiet',            desc: 'silent stdout (exit code only)' },
+    {
+      name: '--accept-untrusted-scan',
+      desc: 'escape hatch: prune even though the transcript scan was empty / errored',
+    },
   ],
   examples: [
     'sessions-db prune                          # report what would be removed',
@@ -113,12 +127,19 @@ export async function run(argv) {
     dryRun: !confirmed,
     olderThanMs,
     reason: parsed.flags['--reason'],
+    acceptUntrustedScan: parsed.flags['--accept-untrusted-scan'] === true,
     ...(root ? { root } : {}),
   });
 
   if (!result.ok && result.error) {
     if (json) {
-      process.stdout.write(formatJSON({ ok: false, error: result.error }));
+      process.stdout.write(formatJSON({
+        ok: false,
+        error: result.error,
+        // Refusals carry the scan that caused them — an operator debugging
+        // "why did my cron job stop pruning?" needs the root it looked at.
+        ...(result.refused ? { refused: true, disk_scan: result.disk_scan } : {}),
+      }));
     } else {
       process.stderr.write(`error: ${result.error}\n`);
     }
@@ -138,6 +159,12 @@ export async function run(argv) {
         disk_scan: result.disk_scan,
       }));
     } else if (!quiet) {
+      // A dry run against an untrusted scan is still allowed (reporting is
+      // not destructive) but the list it produces is meaningless — say so
+      // ABOVE the list, before anyone reads it as a ghost inventory.
+      if (result.disk_scan && result.disk_scan.trusted === false) {
+        process.stdout.write(untrustedScanBanner(result.disk_scan));
+      }
       if (candidates.length === 0) {
         process.stdout.write(
           `ok: prune dry-run — no ghost records among ${result.scanned} sessions\n`,
@@ -154,7 +181,13 @@ export async function run(argv) {
             `csid ${c.claude_session_ids.join(',') || '(none)'}\n`,
           );
         }
-        process.stdout.write('\nRe-run with --yes to remove them.\n');
+        // Do not tell the operator to run a command that will refuse.
+        process.stdout.write(
+          result.disk_scan && result.disk_scan.trusted === false
+            ? '\nFix the transcript scan, then re-run with --yes ' +
+              '(or --yes --accept-untrusted-scan to override).\n'
+            : '\nRe-run with --yes to remove them.\n',
+        );
       }
     }
     return;
@@ -174,6 +207,12 @@ export async function run(argv) {
       disk_scan: result.disk_scan,
     }));
   } else if (!quiet) {
+    // Reached only via --accept-untrusted-scan (the run would have been
+    // refused otherwise). Records were deleted on evidence we told the
+    // operator not to trust, so it belongs in the transcript of the run.
+    if (result.disk_scan && result.disk_scan.trusted === false) {
+      process.stdout.write(untrustedScanBanner(result.disk_scan));
+    }
     if (pruned.length === 0 && failed.length === 0) {
       process.stdout.write(`ok: prune — no ghost records among ${result.scanned} sessions\n`);
     } else {
@@ -194,4 +233,28 @@ export async function run(argv) {
   }
 
   if (failed.length > 0) process.exit(1);
+}
+
+/**
+ * Banner for a scan that proved nothing. Printed before the candidate list so
+ * nobody reads that list as an inventory of ghosts: with an empty or failed
+ * scan, "no transcript on disk" is true of every record, including every real
+ * session that was simply never resumed.
+ *
+ * @param {{ root?: string|null, files?: number, dirs?: number,
+ *   errors?: string[], untrusted_reasons?: string[] }} diskScan
+ * @returns {string}
+ */
+function untrustedScanBanner(diskScan) {
+  const reasons = Array.isArray(diskScan.untrusted_reasons) ? diskScan.untrusted_reasons : [];
+  const detail = reasons.includes('empty_scan')
+    ? `0 transcripts found under ${diskScan.root || '(unknown root)'}`
+    : `${(diskScan.errors || []).length} scan error(s) under ${diskScan.root || '(unknown root)'}`;
+  return (
+    `warning: TRANSCRIPT SCAN NOT TRUSTWORTHY — ${detail}.\n` +
+    'warning: every candidate below may be a real session that was simply ' +
+    'never resumed.\n' +
+    'warning: check DRUUMEN_CLAUDE_PROJECTS_ROOT / HOME before believing this ' +
+    'list.\n\n'
+  );
 }

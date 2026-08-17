@@ -28,8 +28,11 @@
  * ## Safety contract (identical to SessionStart, item for item)
  *
  *  1. cwd-gate — `isDruumenWorkspace` (shared, `lib/hook-common.mjs`).
- *  2. time budget — bootstrap's `setTimeout(1000).unref()`; every sub-probe
- *     is async and bounded so the timer can actually fire. Target p95 200 ms.
+ *  2. time budget — bootstrap's `setTimeout(1000).unref()`, which bounds
+ *     ASYNC stalls only (a timer cannot preempt a blocked event loop, so
+ *     synchronous IO on a wedged mount runs past it — see that file's header).
+ *     Every git probe is async and bounded; the sync surface is the cwd-gate
+ *     read, `readPending`, and prompt sanitisation. Target p95 200 ms.
  *  3. silent stderr — nothing is ever written to stderr by us.
  *  4. exit 0 always — every path, including gate rejection and lock timeout.
  *  5. kill-switch — `DRUUMEN_SESSIONS_DB_DISABLED=1` (bootstrap shim).
@@ -61,6 +64,7 @@ import { createHash } from 'node:crypto';
 
 import { gitContextFast } from '../lib/git-context.mjs';
 import {
+  hasInitializedStorage,
   isDruumenWorkspace,
   isPreviewDisabled,
   looksLikeUuid,
@@ -131,6 +135,29 @@ async function main() {
   // (6) Storage target. Anchored on the git worktree root when we have one,
   // else the gated cwd. Shared resolver — SessionStart MUST land on the same
   // directory or promotion could never find the pending record.
+  //
+  // (6a) Anchor gate. `gitContextFast` collapses EVERY non-zero git exit into
+  // `not_a_repo` + `worktreePath: null`, and "non-zero" covers far more than
+  // "outside a repo": `detected dubious ownership` on a shared or mounted
+  // checkout (dev-offload, containers, NFS) is the realistic one. SessionStart
+  // runs the six-probe `gitContext` and bails outright on `not_a_repo`, so in
+  // that window the two hooks would disagree about where the database lives:
+  // this one would fall back to `workspaceRoot = cwd` and resolveStorageTarget
+  // would happily mint a brand-new `tickets/_logs/` inside whatever
+  // subdirectory the user happened to be in — reproduced as a stray
+  // `packages/deep/app/tickets/_logs/sessions-db-pending/.promoter` showing up
+  // in `git status`, committable by accident.
+  //
+  // So: no worktree root means we only proceed when the target is already an
+  // established storage root (explicit env override, or a cwd that literally
+  // holds the database). Otherwise bail, exactly like SessionStart does. We
+  // lose one heartbeat on a wedged repo; we do not scatter databases.
+  const envRootConfigured = typeof process.env.DRUUMEN_SESSIONS_DB_ROOT === 'string' &&
+    process.env.DRUUMEN_SESSIONS_DB_ROOT.length > 0;
+  if (!gitCtx.worktreePath && !envRootConfigured && !hasInitializedStorage(cwd)) {
+    process.exit(0);
+  }
+
   const workspaceRoot = gitCtx.worktreePath || cwd;
   const recordTargetOpts = resolveStorageTarget({ workspaceRoot });
 
@@ -171,7 +198,7 @@ async function main() {
   // produced, except that it only exists because someone actually typed.
   const pending = readPending(claudeSessionId, recordTargetOpts);
   if (pending) {
-    const promoted = await promote({
+    const promoted = await recordFirstPrompt({
       claudeSessionId,
       pending,
       cwd,
@@ -187,37 +214,81 @@ async function main() {
       deletePending(claudeSessionId, recordTargetOpts);
       process.exit(0);
     }
-    // Promotion failed (lock timeout, disk). Fall through to the heartbeat
-    // path — it targets whatever stable_id already exists and is a no-op when
-    // none does, so we never fabricate identity from a failed promotion.
+    // Promotion failed (lock timeout, disk). Fall through: the path below
+    // heartbeats an existing record or records a new one, and either way the
+    // pending file we just kept means the NEXT prompt tries promotion again.
+    // A promotion landing after a mint is harmless — `recordSessionSeen`
+    // resolves the csid to the record that already exists, and `created_at` is
+    // earliest-wins, so the deferred start time is restored rather than lost.
   }
 
   // (9) Heartbeat path — the steady state, second prompt onward.
   //
   // We resolve the stable_id by csid index rather than calling
-  // recordSessionSeen, for two reasons. First, cost: recordSessionSeen runs
-  // the full three-priority identity chain (lineage + fingerprint
-  // corroborators over every session in the projection) which is far more
-  // work than a heartbeat needs. Second, and more importantly, semantics: a
-  // heartbeat must NEVER mint. If we cannot find the session, the right
-  // answer is to write nothing — a prompt from a session we have no record of
-  // is either a workspace we are not tracking or a race with SessionStart,
-  // and inventing a record for it would reintroduce orphans through a
-  // different door.
-  const stableId = await findStableIdByCsid(claudeSessionId, recordTargetOpts);
-  if (!stableId) {
+  // recordSessionSeen: cost. recordSessionSeen runs the full three-priority
+  // identity chain (lineage + fingerprint corroborators over every session in
+  // the projection), which is far more work than a heartbeat needs.
+  const known = await lookupSessionByCsid(claudeSessionId, recordTargetOpts);
+
+  // (9a) Nothing staged AND nothing recorded — record the session now.
+  //
+  // This is the "the pending record is gone" path, and it must not be an
+  // early exit. `lib/pending.mjs` promises that a lost pending file "degrades
+  // to exactly the pre-existing behaviour (the session gets recorded on its
+  // first prompt, with created_at set to that moment)", and `PENDING_MAX_AGE_MS`
+  // justifies its 24 h GC with that same promise. Exiting here broke both:
+  // once the staged record was gone, EVERY subsequent prompt of that session
+  // took this branch, so the session was never recorded at all. Two ordinary
+  // ways in, both reproduced:
+  //
+  //   - the pending file never landed or was removed (a full or read-only
+  //     disk makes `writePending` return false; SessionStart now falls back
+  //     to recording eagerly when that happens, but a file deleted afterwards
+  //     — by a cleaner, by `sweepPending`, by a user tidying the directory —
+  //     still lands here);
+  //   - the session sat open for more than 24 h without a prompt and
+  //     `sweepPending` reclaimed the staged record. "Leave the tab open on
+  //     Friday, type on Monday" is exactly this case.
+  //
+  // The original objection to minting here — "it is either an untracked
+  // workspace or a race with SessionStart" — does not survive contact with
+  // the code above: the cwd-gate at (3) already established that this
+  // workspace is tracked, and a race with SessionStart is resolved by
+  // `recordSessionSeen` itself, which holds the projection lock and reconciles
+  // by csid index (the loser merges into the winner's stable_id rather than
+  // splitting identity). What is left is a session with a human prompt in
+  // front of us and no record of it, which is precisely what we should write.
+  //
+  // `created_at` is now rather than session start — the deferred observation
+  // that knew the real start time is exactly what went missing. That is the
+  // documented degradation, and it is worth vastly more than losing the
+  // session.
+  if (!known) {
+    await recordFirstPrompt({
+      claudeSessionId,
+      pending: null,
+      cwd,
+      gitCtx,
+      firstPromptPreview,
+      promptFingerprint,
+      recordTargetOpts,
+    });
     process.exit(0);
   }
 
   const event = newEvent({
     op: 'session_progress',
-    stable_id: stableId,
+    stable_id: known.stableId,
     payload: {
       claude_session_id: claudeSessionId,
-      // First-write-wins in the reducer — sending it on every prompt is safe
-      // and covers the case where the promotion path was skipped (session
-      // predates this hook, e.g. an in-flight session at upgrade time).
-      first_prompt_preview: firstPromptPreview,
+      // Only when the record still lacks one. The reducer discards later
+      // previews (first-write-wins), so re-sending it every turn changed
+      // nothing downstream while writing a 200-char excerpt of EVERY prompt
+      // into the append-only log — a privacy surface and a log-growth cost
+      // with no reader. Sending it once, when it is actually missing, keeps
+      // the one case that needs it: a session that predates this hook (or
+      // whose projection write failed) still gets its preview latched.
+      first_prompt_preview: known.hasPreview ? null : firstPromptPreview,
       branch_current: gitCtx.branch,
       head_last_seen: gitCtx.head,
       worktree_path_observed: gitCtx.worktreePath || cwd,
@@ -238,24 +309,31 @@ async function main() {
 }
 
 /**
- * Turn a staged pending record into a real `session_seen` event.
+ * Write the `session_seen` that this session's first prompt earns it.
  *
- * The payload is assembled from BOTH observations: the git/worktree context
- * captured at SessionStart (replayed out of the pending file — it describes
- * where the session began) and the prompt we just received (which SessionStart
- * could not possibly have known). `created_at` carries the deferred
- * observation time so the record dates from process start, not from the first
- * prompt; the reducer takes the earlier of the two (see `reduceSessionSeen`).
+ * Serves both entry points, which differ only in what they know about the
+ * session's start:
  *
- * Runs through `recordSessionSeen` rather than a raw event append so the
- * promotion goes through the same atomic identity transaction as any other
+ *   - **promotion** (`pending` set) — SessionStart staged this session, so we
+ *     replay the git/worktree context it captured and date the record from
+ *     `observed_at`. The reducer takes the earlier of that and the event ts
+ *     (see `reduceSessionSeen`), so the record dates from process start
+ *     rather than from the first prompt.
+ *   - **mint** (`pending` null) — nothing was staged and nothing is recorded.
+ *     The session-start facts are gone with the pending file, so this turn's
+ *     probe stands in for them and `created_at` falls back to the event ts.
+ *     Payload carries `minted_from_prompt: true` so the log says which of the
+ *     two paths produced the record.
+ *
+ * Runs through `recordSessionSeen` rather than a raw event append so either
+ * path goes through the same atomic identity transaction as any other
  * `session_seen`: if a concurrent SessionStart already recorded this session
- * (resume race), the csid index resolves to the existing stable_id and the
- * promotion merges into it instead of splitting identity.
+ * (resume race), the csid index resolves to the existing stable_id and this
+ * write merges into it instead of splitting identity.
  *
  * @returns {Promise<boolean>} true when the event is durable
  */
-async function promote({
+async function recordFirstPrompt({
   claudeSessionId,
   pending,
   cwd,
@@ -288,26 +366,29 @@ async function promote({
       payloadBuilder: () => ({
         claude_session_id: claudeSessionId,
         // Earliest-wins in the reducer — this is the whole reason the pending
-        // area stores `observed_at`.
-        created_at: pickString(pending.observed_at) || undefined,
-        // Session-start facts, replayed from the pending record.
-        branch_at_start: pending.branch_at_start ?? null,
-        head_at_start: pending.head_at_start ?? null,
-        worktree_realpath: pending.worktree_realpath ?? null,
-        worktree_registry_name: pending.worktree_registry_name ?? null,
-        git_common_dir: pending.git_common_dir ?? null,
+        // area stores `observed_at`. Absent on the mint path, where the
+        // reducer's default (event ts = now) is the documented degradation.
+        created_at: pending ? pickString(pending.observed_at) || undefined : undefined,
+        // Session-start facts, replayed from the pending record when we have
+        // one. Without it, this turn's probe is the earliest observation that
+        // exists, so it stands in — a real branch beats a null.
+        branch_at_start: pending ? pending.branch_at_start ?? null : gitCtx.branch ?? null,
+        head_at_start: pending ? pending.head_at_start ?? null : gitCtx.head ?? null,
+        worktree_realpath: pending?.worktree_realpath ?? null,
+        worktree_registry_name: pending?.worktree_registry_name ?? null,
+        git_common_dir: pending?.git_common_dir ?? null,
         // Current facts, from this turn's probe (branch may already have
         // moved between session start and first prompt).
-        branch_current: gitCtx.branch ?? pending.branch_at_start ?? null,
-        head_last_seen: gitCtx.head ?? pending.head_at_start ?? null,
-        worktree_path_observed: gitCtx.worktreePath || pending.worktree_path_observed || cwd,
+        branch_current: gitCtx.branch ?? pending?.branch_at_start ?? null,
+        head_last_seen: gitCtx.head ?? pending?.head_at_start ?? null,
+        worktree_path_observed: gitCtx.worktreePath || pending?.worktree_path_observed || cwd,
         // No transcript was read — an explicit null keeps the reducer from
         // pushing an entry into transcript_files[].
         transcript_file: null,
         fingerprints,
         first_prompt_preview: firstPromptPreview,
-        cwd: pickString(pending.cwd) || cwd,
-        promoted_from_pending: true,
+        cwd: pickString(pending?.cwd) || cwd,
+        ...(pending ? { promoted_from_pending: true } : { minted_from_prompt: true }),
       }),
     });
     return !!(result && result.ok);
@@ -317,24 +398,37 @@ async function promote({
 }
 
 /**
- * Reverse-lookup a stable_id from a claude_session_id.
+ * Reverse-lookup the record for a claude_session_id.
+ *
+ * Returns the stable_id plus whether that record already has a first-prompt
+ * preview — the projection is already loaded here, so answering the second
+ * question is free, and it is what lets the heartbeat stop re-sending a
+ * preview the reducer would only throw away.
  *
  * Unlocked read: the heartbeat is advisory, and the failure mode of a stale
  * read is "we skip one heartbeat", which the next prompt repairs. Taking the
  * projection lock twice per prompt (once to look up, once to write) would
  * double this hook's contention for no correctness gain.
  *
- * Returns null on miss, corrupt projection, or any read failure — all of
- * which mean "write nothing".
+ * Returns null on miss, corrupt projection, or any read failure. Null means
+ * "no record exists", which the caller turns into a mint — a read failure
+ * degrading into a duplicate record is not possible, because the mint runs
+ * through `recordSessionSeen`, which re-resolves identity under the lock.
+ *
+ * @returns {Promise<{ stableId: string, hasPreview: boolean }|null>}
  */
-async function findStableIdByCsid(claudeSessionId, recordTargetOpts) {
+async function lookupSessionByCsid(claudeSessionId, recordTargetOpts) {
   try {
     const projection = await loadProjection(recordTargetOpts);
     const sessions = (projection && projection.sessions) || {};
     for (const [stableId, s] of Object.entries(sessions)) {
       if (s && Array.isArray(s.claude_session_ids) &&
           s.claude_session_ids.includes(claudeSessionId)) {
-        return stableId;
+        return {
+          stableId,
+          hasPreview: typeof s.first_prompt_preview === 'string' &&
+            s.first_prompt_preview.length > 0,
+        };
       }
     }
   } catch {

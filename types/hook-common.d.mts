@@ -36,6 +36,25 @@ export function readStdinJson({ timeoutMs }?: {
  */
 export function isDruumenWorkspace(cwd: string): boolean;
 /**
+ * Does `dir` ITSELF already hold an initialized sessions-db (either storage
+ * convention: cockpit-marketplace `.dru-code/` or druumen-monorepo
+ * `tickets/_logs/`)? No ancestor walk — the question is specifically "is this
+ * directory a storage root", not "is it inside a tracked workspace".
+ *
+ * Two callers, both of which need the narrow question:
+ *   - `isDruumenWorkspace` walks ancestors itself and asks per level.
+ *   - the `UserPromptSubmit` hook asks it about a cwd it is considering
+ *     anchoring storage on when the git probe could not give it a worktree
+ *     root. Anchoring on a directory that is NOT already a storage root would
+ *     CREATE a second database inside the user's repo (observed: a
+ *     `packages/deep/app/tickets/_logs/` appearing in `git status`), so "we
+ *     already write here" is exactly the fact that has to be true.
+ *
+ * @param {string} dir
+ * @returns {boolean}
+ */
+export function hasInitializedStorage(dir: string): boolean;
+/**
  * Resolve which storage location a hook should write into.
  *
  * Three-tier strategy so cockpit-marketplace users (who have a `.dru-code/`
