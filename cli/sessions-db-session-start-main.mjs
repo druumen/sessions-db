@@ -42,12 +42,12 @@
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 import {
   extractLatestAiTitle,
-  listTranscriptFiles,
+  findTranscriptByCsid,
   parseTranscriptFile,
   workspaceHashFromCwd,
 } from '../lib/transcript.mjs';
@@ -59,6 +59,15 @@ import {
   tryUpdateProjection,
 } from '../lib/storage.mjs';
 import { gitContext } from '../lib/git-context.mjs';
+import { isPromoterAlive, sweepPending, writePending } from '../lib/pending.mjs';
+import {
+  isDruumenWorkspace,
+  isPreviewDisabled,
+  looksLikeUuid,
+  pickString,
+  readStdinJson,
+  resolveStorageTarget,
+} from '../lib/hook-common.mjs';
 
 // ---------------------------------------------------------------------------
 // Top-level safety wrapper. Any unhandled rejection in main() exits 0 silently
@@ -108,44 +117,12 @@ async function main() {
     process.exit(0);
   }
 
-  // (5) Resolve the storage root. Three-tier strategy so cockpit-marketplace
-  // users (who have a `.dru-code/` storage dir) and druumen-monorepo users
-  // (who have a `tickets/_logs/` storage dir) BOTH have their hooks write
-  // into the exact location their reader is watching:
-  //
-  //   (5a) `DRUUMEN_SESSIONS_DB_ROOT` env var overrides everything. Cockpit
-  //        Setup Wizard writes this into the hook command line so the hook
-  //        knows the precise storage dir (typically `<ws>/.dru-code`) the
-  //        user opted into via Enable. Forwarded as `{ rootPath }` —
-  //        recordSessionSeen treats it as the bare storage dir (no
-  //        `tickets/_logs/` prefix added).
-  //
-  //   (5b) Auto-detect `<workspaceRoot>/.dru-code/sessions-db.json` when no
-  //        env override is set. If the user (or wizard) opted in via the
-  //        new-convention layout we honor it without polluting their repo
-  //        with a `tickets/_logs/` subdir.
-  //
-  //   (5c) Fall back to the historic `{ root: workspaceRoot }` form which
-  //        writes under `<workspaceRoot>/tickets/_logs/`. Druumen monorepo
-  //        relies on this; existing `tickets/_logs/sessions-db.json` data
-  //        keeps accumulating in the same place.
-  //
-  // NEVER fall back to process.cwd() — see (2).
+  // (5) Resolve the storage root (env override > auto-detected `.dru-code/`
+  // > legacy `tickets/_logs/` anchored on the workspace root). Shared with
+  // the UserPromptSubmit hook — see lib/hook-common.mjs for why the two must
+  // agree byte-for-byte. NEVER falls back to process.cwd() — see (2).
   const workspaceRoot = gitCtx.worktreePath || cwd;
-  const envRoot = process.env.DRUUMEN_SESSIONS_DB_ROOT;
-
-  let recordTargetOpts;
-  if (typeof envRoot === 'string' && envRoot.length > 0) {
-    // (5a) env override — new-convention rootPath shape.
-    recordTargetOpts = { rootPath: envRoot };
-  } else if (existsSync(join(workspaceRoot, '.dru-code', 'sessions-db.json'))) {
-    // (5b) auto-detect .dru-code/ — new-convention rootPath shape pointing
-    // at the storage subdir, not the workspace root.
-    recordTargetOpts = { rootPath: join(workspaceRoot, '.dru-code') };
-  } else {
-    // (5c) legacy fallback — tickets/_logs/ anchored at workspace root.
-    recordTargetOpts = { root: workspaceRoot };
-  }
+  const recordTargetOpts = resolveStorageTarget({ workspaceRoot });
 
   // (6) claude_session_id — required input. Without it we cannot reconcile
   // identity at all, so we bail rather than minting a stable_id we can never
@@ -184,6 +161,79 @@ async function main() {
   const firstPromptPreview = transcriptMeta?.firstHumanPromptRaw
     ? sanitizeFirstPrompt(transcriptMeta.firstHumanPromptRaw)
     : null;
+
+  // (9a) DEFER GATE — the fix for ghost records.
+  //
+  // SessionStart fires when a Claude Code *process* comes up, which is not
+  // the same event as a human starting a session. Claude Code 2.1.x keeps a
+  // daemon warm-pool (`claude bg-spare` / `bg-pty-host`) and the IDE panel
+  // spawns its own processes; each mints a session id and trips this hook,
+  // and most are never spoken to. Measured on the reference machine: 11 of
+  // 13 records created in one day were processes that never got a prompt.
+  // Because the event log has no delete op, every one of them was permanent.
+  //
+  // So: unless we have positive evidence that this session is real, we do
+  // NOT write an event. We stage a pending record instead and let the first
+  // `UserPromptSubmit` promote it (lib/pending.mjs explains the design and
+  // why the pending-area shape beats a `provisional: true` flag).
+  //
+  // Two independent pieces of evidence count as "real", either is enough:
+  //
+  //   (i)  the transcript already contains a human prompt — this is a
+  //        resume / continue / compact of a session that has been used.
+  //        `transcriptMeta.firstHumanPromptRaw` is exactly that signal.
+  //   (ii) the claude_session_id is already in the projection — we have
+  //        recorded this session before, so there is nothing to defer; the
+  //        record exists and this observation refreshes it (branch drift,
+  //        ai_title, transcript lineage).
+  //
+  // Order matters for cost: (i) is already computed, (ii) costs a projection
+  // load. The load is unlocked, which is safe: a concurrent write could make
+  // us miss a just-created record, and the only consequence is that we defer
+  // a session that is already known — the promoting event then resolves to
+  // the SAME stable_id via the csid index, so no identity splits and no data
+  // is lost. "Cannot verify" degrades to "defer", never to "duplicate".
+  // Third condition, and the one that keeps this change from being able to
+  // lose data: we defer ONLY if a promoter is demonstrably alive for this
+  // storage root. The two hooks are registered independently, so a user who
+  // upgrades the package without adding the `UserPromptSubmit` entry to
+  // settings.json would otherwise get a SessionStart that defers everything
+  // and nothing that ever promotes — silently recording no sessions at all,
+  // which is strictly worse than the ghosts we are removing. Without the
+  // marker we fall back to the pre-0.2.0 always-record behaviour. See
+  // `markPromoterAlive` in lib/pending.mjs for why this is a marker file
+  // rather than a settings.json parse.
+  const hasHumanPrompt = typeof transcriptMeta?.firstHumanPromptRaw === 'string' &&
+    transcriptMeta.firstHumanPromptRaw.length > 0;
+
+  if (!hasHumanPrompt &&
+      isPromoterAlive(recordTargetOpts) &&
+      !(await isKnownSession(claudeSessionId, recordTargetOpts))) {
+    // Stage, GC, exit. No lock taken, no event appended, no projection write
+    // — a warm-pool spawn now costs one small file instead of a full
+    // read-modify-write cycle on the projection under contention.
+    writePending({
+      claude_session_id: claudeSessionId,
+      observed_at: new Date().toISOString(),
+      cwd,
+      source: pickString(input?.source),
+      branch_at_start: gitCtx.branch,
+      head_at_start: gitCtx.head,
+      worktree_path_observed: gitCtx.worktreePath || cwd,
+      worktree_realpath: gitCtx.worktreeRealpath,
+      worktree_registry_name: gitCtx.registryName,
+      git_common_dir: gitCtx.gitCommonDir,
+    }, recordTargetOpts);
+
+    // Opportunistic GC of pending records whose session never spoke. Bounded
+    // readdir, no lock; keeps the staging area self-limiting without a cron.
+    try {
+      sweepPending(recordTargetOpts);
+    } catch {
+      // best-effort — exit-0 contract
+    }
+    process.exit(0);
+  }
 
   // (9b) Privacy opt-out gate. The env var DRUUMEN_SESSIONS_DB_STORE_PREVIEW
   // mirrors the cockpit Setup Wizard's "Store first prompt preview" checkbox.
@@ -278,6 +328,35 @@ async function main() {
 }
 
 /**
+ * Is this claude_session_id already recorded in the projection?
+ *
+ * Used only by the defer gate. Deliberately reads OUTSIDE the projection lock
+ * — this is an advisory check whose false-negative (a record created by a
+ * concurrent hook microseconds ago) degrades to "defer this session", which
+ * the next prompt repairs by resolving to the same stable_id via the csid
+ * index. Taking the lock here would put every warm-pool spawn back into the
+ * critical section, which is precisely what the defer gate exists to avoid.
+ *
+ * Any failure (missing / corrupt projection) answers `false` — unknown means
+ * defer, which is the conservative direction.
+ */
+async function isKnownSession(claudeSessionId, recordTargetOpts) {
+  try {
+    const projection = await loadProjection(recordTargetOpts);
+    const sessions = (projection && projection.sessions) || {};
+    for (const s of Object.values(sessions)) {
+      if (s && Array.isArray(s.claude_session_ids) &&
+          s.claude_session_ids.includes(claudeSessionId)) {
+        return true;
+      }
+    }
+  } catch {
+    // fall through — unknown
+  }
+  return false;
+}
+
+/**
  * Tail-scan `transcriptPath` for the most-recent `ai-title` record. If the
  * harvested title differs from the projection's current `ai_title` for
  * `stableId`, append an `ai_title_seen` event so the projection reflects
@@ -348,163 +427,68 @@ async function harvestAiTitle({ stableId, transcriptPath, recordTargetOpts }) {
 // ---------------------------------------------------------------------------
 
 /**
- * Read a single JSON object from stdin within `timeoutMs`. Returns null on
- * timeout, empty stdin, or invalid JSON. Never throws.
- */
-function readStdinJson({ timeoutMs }) {
-  return new Promise((resolve) => {
-    // Detached / non-piped stdin (e.g. terminal): isTTY is true. Don't even
-    // bother waiting.
-    if (process.stdin.isTTY) {
-      resolve(null);
-      return;
-    }
-
-    let settled = false;
-    const chunks = [];
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      try {
-        process.stdin.removeAllListeners('data');
-        process.stdin.removeAllListeners('end');
-        process.stdin.removeAllListeners('error');
-      } catch {
-        // ignore
-      }
-      resolve(value);
-    };
-
-    const timer = setTimeout(() => finish(null), timeoutMs);
-    timer.unref();
-
-    process.stdin.on('data', (c) => chunks.push(c));
-    process.stdin.on('end', () => {
-      clearTimeout(timer);
-      if (chunks.length === 0) {
-        finish(null);
-        return;
-      }
-      try {
-        const text = Buffer.concat(chunks).toString('utf8').trim();
-        if (text.length === 0) {
-          finish(null);
-          return;
-        }
-        finish(JSON.parse(text));
-      } catch {
-        finish(null);
-      }
-    });
-    process.stdin.on('error', () => {
-      clearTimeout(timer);
-      finish(null);
-    });
-  });
-}
-
-/**
- * Decide whether the hook is allowed to record events for `cwd`.
+ * Resolve the claude transcript jsonl path. Layered, and every layer is an
+ * EXACT match — no layer ever guesses.
  *
- * Two acceptance fast-paths, either of which is sufficient:
- *
- *   1. **Druumen Workspace sentinel** — a `CLAUDE.md` at `cwd` or any
- *      ancestor whose body contains the literal string "Druumen Workspace".
- *      Original 0.1.x gate; how the Druumen monorepo opts in.
- *
- *   2. **Pre-initialized sessions-db storage** — `.dru-code/sessions-db.json`
- *      or `tickets/_logs/sessions-db.json` already exists at `cwd` or any
- *      ancestor. The cockpit Setup Wizard creates this file when the user
- *      explicitly enables sessions tracking for a workspace; an external
- *      project that has never opted in will not have either marker.
- *
- * Either marker is treated as user consent for this workspace. The walk
- * is bounded to 12 ancestors so a runaway loop (e.g. weird FS mount)
- * cannot stall us; the loop terminates early as soon as ANY marker is
- * found at the current level.
- *
- * The function name is kept (`isDruumenWorkspace`) for git history clarity
- * even though the semantic has broadened to "authorized workspace". Both
- * acceptance criteria are checked at each ancestor before walking up
- * (cheap stat-only probes for the storage paths).
- *
- * Returns true on the first hit, false after 12 ancestors / filesystem
- * root / read errors with no marker found.
- */
-function isDruumenWorkspace(cwd) {
-  if (typeof cwd !== 'string' || cwd.length === 0) return false;
-  let dir = cwd;
-  for (let i = 0; i < 12; i++) {
-    // Fast-path 1: CLAUDE.md sentinel
-    const claudeMd = join(dir, 'CLAUDE.md');
-    if (existsSync(claudeMd)) {
-      try {
-        // We only need the first ~8KB to find the sentinel; CLAUDE.md is
-        // typically short, so reading the whole file is fine.
-        const body = readFileSync(claudeMd, 'utf8');
-        if (body.includes('Druumen Workspace')) return true;
-      } catch {
-        // unreadable — keep walking up just in case there's a higher one.
-      }
-    }
-    // Fast-path 2: pre-initialized sessions-db storage. Stat-only — we
-    // don't read these files here, just check existence. Either convention
-    // (cockpit-marketplace `.dru-code/` or druumen-monorepo `tickets/_logs/`)
-    // counts as opt-in.
-    if (
-      existsSync(join(dir, '.dru-code', 'sessions-db.json')) ||
-      existsSync(join(dir, 'tickets', '_logs', 'sessions-db.json'))
-    ) {
-      return true;
-    }
-    const parent = dirname(dir);
-    if (parent === dir) return false;
-    dir = parent;
-  }
-  return false;
-}
-
-/**
- * Resolve the claude transcript jsonl path. Layered:
  *  1. explicit hook payload — trust it as long as the file actually exists.
  *  2. canonical path: ~/.claude/projects/<hash>/<claudeSessionId>.jsonl.
- *  3. fallback: newest jsonl in the workspace's claude projects dir (Claude
- *     Code occasionally lands transcripts under a slightly different filename
- *     during fork/resume — newest-by-mtime is the right tie-breaker).
+ *  3. cross-directory exact lookup: the same `<claudeSessionId>.jsonl`
+ *     filename in ANY workspace dir (covers cwd/hash drift — launched from a
+ *     subdirectory, symlinked cwd, workspace renamed).
  *
  * Returns null when nothing usable is found.
+ *
+ * ## What layer 3 used to be, and why it had to change
+ *
+ * Layer 3 was "newest `.jsonl` in the workspace dir, by mtime". That is a
+ * guess, and it was only ever harmless by accident: `workspaceHashFromCwd`
+ * mis-encoded any path containing `_`, a space, `~`, or non-ASCII, so for the
+ * affected workspaces the directory was never found and the fallback returned
+ * nothing at all. Fixing the hash (0.1.7) armed the guess — the directory now
+ * resolves, and on this machine it holds 206 transcripts belonging to other
+ * sessions. The newest of those is essentially never the caller's.
+ *
+ * The blast radius is not cosmetic: a wrong path lands in `transcript_files[]`
+ * and feeds `first_uuid` / `last_uuid` into the P2 `transcript_lineage`
+ * matcher, which can then merge two unrelated sessions into one stable_id.
+ * Attaching no transcript is strictly better than attaching a stranger's.
+ *
+ * The replacement keeps the property the old fallback was reaching for
+ * (tolerance for the transcript not living under the hash we computed) and
+ * drops the property that made it dangerous (picking a file by recency
+ * instead of by identity).
  */
 function locateTranscript({ explicit, cwd, claudeSessionId }) {
   if (explicit && existsSync(explicit)) return explicit;
 
   // Canonical path computation requires an absolute cwd; we only walk this
-  // path when it is.
-  if (typeof cwd !== 'string' || !cwd.startsWith('/')) return null;
-  let hash;
+  // path when it is. (Layer 3 does not need the cwd, so it still runs.)
+  if (typeof cwd === 'string' && cwd.startsWith('/')) {
+    let hash = null;
+    try {
+      hash = workspaceHashFromCwd(cwd);
+    } catch {
+      hash = null;
+    }
+    if (hash) {
+      const canonical = join(
+        process.env.HOME || '',
+        '.claude',
+        'projects',
+        hash,
+        `${claudeSessionId}.jsonl`,
+      );
+      if (existsSync(canonical)) return canonical;
+    }
+  }
+
+  // Layer 3 — exact filename, any workspace directory. Never returns a file
+  // whose name is not this session's id.
   try {
-    hash = workspaceHashFromCwd(cwd);
+    return findTranscriptByCsid(claudeSessionId);
   } catch {
     return null;
   }
-
-  const canonical = join(
-    process.env.HOME || '',
-    '.claude',
-    'projects',
-    hash,
-    `${claudeSessionId}.jsonl`,
-  );
-  if (existsSync(canonical)) return canonical;
-
-  // Fallback: newest jsonl in the workspace dir. listTranscriptFiles already
-  // sorts by mtime descending so the head of the list is the most-recent.
-  let files;
-  try {
-    files = listTranscriptFiles(hash);
-  } catch {
-    return null;
-  }
-  return files.length > 0 ? files[0] : null;
 }
 
 /**
@@ -596,40 +580,4 @@ function computeFingerprints(transcriptMeta) {
 
 function sha256Prefix(text) {
   return createHash('sha256').update(text).digest('hex').slice(0, 16);
-}
-
-function pickString(v) {
-  return typeof v === 'string' && v.length > 0 ? v : null;
-}
-
-/**
- * Cheap UUID-shape validator. We don't want to lock ourselves to v4-only or
- * v7-only since Claude Code's session_id format may evolve, but we DO want to
- * reject obvious junk (empty / control chars / whitespace) that would corrupt
- * the events.jsonl line.
- */
-function looksLikeUuid(s) {
-  return typeof s === 'string' &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
-}
-
-/**
- * Privacy opt-out predicate for `DRUUMEN_SESSIONS_DB_STORE_PREVIEW`.
- *
- * Returns true ONLY for the literal opt-out values `'0'` and `'false'`
- * (case-insensitive, after trim). Everything else — unset, empty string,
- * `'1'`, `'true'`, `'yes'`, garbage — keeps the default-on behavior.
- *
- * Why this asymmetric shape? The default is preview-stored (backward compat
- * with 0.1.0-dev) and we want a typo in the env var to fail SAFE: an
- * operator who intends to opt out but mistypes (e.g. sets `=False` and
- * trusts case-insensitivity) gets opt-out, but a typo like `=fals` or
- * `=disabled` keeps the default. Treating only the two canonical strings
- * as off-signals makes the gate predictable; cockpit's Setup Wizard always
- * writes one of the two canonical values when the user unticks the box.
- */
-function isPreviewDisabled(envValue) {
-  if (typeof envValue !== 'string') return false;
-  const v = envValue.trim().toLowerCase();
-  return v === '0' || v === 'false';
 }

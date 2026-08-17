@@ -11,6 +11,7 @@
  *   close         set outcome + closed_at + reason
  *   rebuild       rebuild projection from events.jsonl
  *   sweep         apply activity_state transitions (active → idle → archived)
+ *   prune         remove ghost records (never-used sessions) — dry run by default
  *
  * Global flags supported by every handler:
  *   --json        machine-readable JSON output
@@ -43,6 +44,7 @@ const COMMANDS = {
   close: () => import('./close.mjs'),
   rebuild: () => import('./rebuild.mjs'),
   sweep: () => import('./sweep.mjs'),
+  prune: () => import('./prune.mjs'),
 };
 
 function printRootHelp() {
@@ -59,6 +61,7 @@ function printRootHelp() {
     '  close         Set outcome + closed_at + reason (or reopen)',
     '  rebuild       Rebuild projection cache from events.jsonl',
     '  sweep         Apply activity_state transitions (active → idle → archived)',
+    '  prune         Remove ghost records — never-used sessions (DRY RUN by default)',
     '',
     'Run `sessions-db <command> --help` for subcommand-specific flags.',
     '',

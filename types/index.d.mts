@@ -1,10 +1,13 @@
 export { initProjection } from "./init.mjs";
 export { watchProjection } from "./watch.mjs";
-export { loadProjection, rebuildProjection, recordSessionSeen, tryUpdateProjection, newEvent, appendEvent, readAllEvents, saveProjection, PATHS, MAX_EVENT_BYTES } from "./storage.mjs";
+export { loadProjection, rebuildProjection, recordSessionSeen, tryUpdateProjection, newEvent, appendEvent, readAllEvents, saveProjection, storageDir, lockPathFor, PATHS, MAX_EVENT_BYTES } from "./storage.mjs";
 export { setAlias, linkTask, unlinkTask, setParent, closeSession, runSweep } from "./operations.mjs";
 export { resolveStoragePaths, pathsFromRoot, STORAGE_FILENAMES, MAX_ASCEND_DEPTH } from "./paths.mjs";
 export { resolveIdentity, findByClaudeSessionId, findByTranscriptLineage, scanFingerprintCandidates, collectParentCandidates, capParentCandidates, classifyCorroborators, meetsThreshold, MAX_PARENT_CANDIDATES, STRONG_CORROBORATORS, WEAK_CORROBORATORS } from "./identity.mjs";
 export { computeSweepTransitions, computeEffectiveLastProgress } from "./sweep.mjs";
+export { runPrune, computePruneCandidates, hasTranscriptOnDisk, parseDuration, DEFAULT_OLDER_THAN_MS } from "./prune.mjs";
+export { pendingDir, pendingPath, writePending, readPending, deletePending, listPending, sweepPending, markPromoterAlive, isPromoterAlive, PENDING_DIRNAME, PENDING_MAX_AGE_MS, PROMOTER_MARKER, PROMOTER_MAX_AGE_MS } from "./pending.mjs";
+export { workspaceHashFromCwd, listTranscriptFiles, findTranscriptByCsid, indexTranscriptCsids } from "./transcript.mjs";
 export { sanitizeFirstPrompt, stripIdeWrappers, stripSystemReminders } from "./sanitize.mjs";
 export { generateSessionId, isSessionId, extractTimestamp } from "./uuid.mjs";
 export { applyEvent, emptyProjection, emptySession, rebuildFromEvents } from "./projection.mjs";

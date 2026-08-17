@@ -1,6 +1,6 @@
 {
   "name": "@druumen/sessions-db",
-  "version": "0.1.7",
+  "version": "0.2.0",
   "description": "Cross-session traceability for Claude Code — events.jsonl SSoT + JSON projection cache + 3-priority identity reconciliation",
   "license": "Apache-2.0",
   "type": "module",
@@ -9,7 +9,8 @@
   "types": "./types/index.d.ts",
   "bin": {
     "sessions-db": "./cli/sessions-db.mjs",
-    "sessions-db-session-start": "./cli/sessions-db-session-start.mjs"
+    "sessions-db-session-start": "./cli/sessions-db-session-start.mjs",
+    "sessions-db-user-prompt": "./cli/sessions-db-user-prompt.mjs"
   },
   "exports": {
     ".": {
@@ -31,7 +32,11 @@
       "import": "./cli/sessions-db-session-start.mjs",
       "default": "./cli/sessions-db-session-start.mjs"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./hook/user-prompt": {
+      "import": "./cli/sessions-db-user-prompt.mjs",
+      "default": "./cli/sessions-db-user-prompt.mjs"
+    }
   },
   "files": [
     "lib/",
@@ -60,12 +65,14 @@
     "developer-tools"
   ],
   "scripts": {
-    "test": "find __tests__ -name '*.test.mjs' -type f -print0 | xargs -0 node --test",
+    "test": "npm run test:lib && npm run test:hooks",
     "build:types": "tsc -p tsconfig.json",
     "build:cjs": "esbuild lib/index.mjs --bundle --format=cjs --platform=node --target=node18 --outfile=lib/index.cjs",
     "build": "npm run build:types && npm run build:cjs",
     "check:types-smoke": "tsc --noEmit -p __tests__/types-smoke/tsconfig.json",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test:lib": "find __tests__ -name '*.test.mjs' -type f -not -path '__tests__/hook/*' -print0 | xargs -0 node --test",
+    "test:hooks": "find __tests__/hook -name '*.test.mjs' -type f -print0 | xargs -0 node --test --test-concurrency=1"
   },
   "devDependencies": {
     "esbuild": "^0.25.12",
