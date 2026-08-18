@@ -674,4 +674,272 @@ describe('projection.mjs', () => {
       assert.equal(p.sessions[SID].activity_state, 'active');
     });
   });
+
+  // -------------------------------------------------------------------------
+  // session_progress — the per-turn heartbeat written by the UserPromptSubmit
+  // hook. Its field semantics are deliberately asymmetric, and each half has
+  // a defect it exists to fix.
+  // -------------------------------------------------------------------------
+
+  describe('reduceSessionProgress', () => {
+    it('appends claude_session_id (deduped)', () => {
+      const p = emptyProjection();
+      applyEvent(p, evt('session_progress', TS_A, { claude_session_id: 'csid-1' }));
+      applyEvent(p, evt('session_progress', TS_B, { claude_session_id: 'csid-1' }, 'b'));
+      applyEvent(p, evt('session_progress', TS_C, { claude_session_id: 'csid-2' }, 'c'));
+      assert.deepEqual(p.sessions[SID].claude_session_ids, ['csid-1', 'csid-2']);
+    });
+
+    it('advances last_progress_at on every event', () => {
+      const p = emptyProjection();
+      applyEvent(p, evt('session_progress', TS_A, { claude_session_id: 'csid-1' }));
+      assert.equal(p.sessions[SID].last_progress_at, TS_A);
+      applyEvent(p, evt('session_progress', TS_D, { claude_session_id: 'csid-1' }, 'd'));
+      assert.equal(p.sessions[SID].last_progress_at, TS_D);
+    });
+
+    it('first_prompt_preview is FIRST-write-wins', () => {
+      // Last-write-wins here would leave every session titled by whatever the
+      // user typed most recently ("ok", "continue") instead of by the question
+      // that opened it.
+      const p = emptyProjection();
+      applyEvent(p, evt('session_progress', TS_A, {
+        claude_session_id: 'csid-1',
+        first_prompt_preview: 'the original question',
+      }));
+      applyEvent(p, evt('session_progress', TS_B, {
+        claude_session_id: 'csid-1',
+        first_prompt_preview: 'ok',
+      }, 'b'));
+      assert.equal(p.sessions[SID].first_prompt_preview, 'the original question');
+    });
+
+    it('a null preview does not latch, so a later real preview still lands', () => {
+      // The privacy opt-out sends null. If null latched, turning the opt-out
+      // back off would never recover a preview for that session.
+      const p = emptyProjection();
+      applyEvent(p, evt('session_progress', TS_A, {
+        claude_session_id: 'csid-1',
+        first_prompt_preview: null,
+      }));
+      assert.equal(p.sessions[SID].first_prompt_preview, null);
+      applyEvent(p, evt('session_progress', TS_B, {
+        claude_session_id: 'csid-1',
+        first_prompt_preview: 'now it is stored',
+      }, 'b'));
+      assert.equal(p.sessions[SID].first_prompt_preview, 'now it is stored');
+    });
+
+    it('branch_current / head_last_seen are LAST-write-wins', () => {
+      // These are the only fields that genuinely drift mid-session, which is
+      // the entire justification for the hook paying for a git probe.
+      const p = emptyProjection();
+      applyEvent(p, evt('session_progress', TS_A, {
+        claude_session_id: 'csid-1',
+        branch_current: 'master',
+        head_last_seen: 'a'.repeat(40),
+      }));
+      applyEvent(p, evt('session_progress', TS_B, {
+        claude_session_id: 'csid-1',
+        branch_current: 'feat/x',
+        head_last_seen: 'b'.repeat(40),
+      }, 'b'));
+      assert.equal(p.sessions[SID].branch_current, 'feat/x');
+      assert.equal(p.sessions[SID].head_last_seen, 'b'.repeat(40));
+    });
+
+    it('does not touch branch_at_start / head_at_start', () => {
+      // Progress events describe "now". Overwriting the at-start snapshot
+      // would destroy the only record of where the session began.
+      const p = emptyProjection();
+      applyEvent(p, evt('session_seen', TS_A, {
+        claude_session_id: 'csid-1',
+        branch_at_start: 'master',
+        head_at_start: 'a'.repeat(40),
+      }));
+      applyEvent(p, evt('session_progress', TS_B, {
+        claude_session_id: 'csid-1',
+        branch_current: 'feat/x',
+        head_last_seen: 'b'.repeat(40),
+      }, 'b'));
+      assert.equal(p.sessions[SID].branch_at_start, 'master');
+      assert.equal(p.sessions[SID].head_at_start, 'a'.repeat(40));
+    });
+
+    it('is idempotent under replay', () => {
+      const events = [
+        evt('session_progress', TS_A, { claude_session_id: 'csid-1', first_prompt_preview: 'q' }),
+        evt('session_progress', TS_B, { claude_session_id: 'csid-1', branch_current: 'feat/x' }, 'b'),
+      ];
+      const once = rebuildFromEvents(events);
+      const twice = rebuildFromEvents([...events, ...events]);
+      assert.deepEqual(twice.sessions[SID].claude_session_ids,
+        once.sessions[SID].claude_session_ids);
+      assert.equal(twice.sessions[SID].first_prompt_preview,
+        once.sessions[SID].first_prompt_preview);
+      assert.equal(twice.sessions[SID].branch_current, once.sessions[SID].branch_current);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // created_at — earliest-wins, so a promotion from the pending area can date
+  // the record from process start rather than from the first prompt.
+  // -------------------------------------------------------------------------
+
+  describe('session_seen created_at (earliest-wins)', () => {
+    it('an earlier payload created_at overrides the event ts', () => {
+      const p = emptyProjection();
+      applyEvent(p, evt('session_seen', TS_C, {
+        claude_session_id: 'csid-1',
+        created_at: TS_A,
+      }));
+      assert.equal(p.sessions[SID].created_at, TS_A);
+      // last_progress_at still reflects the event, not the backdated birth.
+      assert.equal(p.sessions[SID].last_progress_at, TS_C);
+    });
+
+    it('a LATER payload created_at is ignored', () => {
+      // Monotone-decreasing is what makes the field order-independent; letting
+      // a later value win would make replay order observable.
+      const p = emptyProjection();
+      applyEvent(p, evt('session_seen', TS_A, { claude_session_id: 'csid-1' }));
+      applyEvent(p, evt('session_seen', TS_B, {
+        claude_session_id: 'csid-1',
+        created_at: TS_D,
+      }, 'b'));
+      assert.equal(p.sessions[SID].created_at, TS_A);
+    });
+
+    it('absent payload created_at leaves the event-ts default intact', () => {
+      const p = emptyProjection();
+      applyEvent(p, evt('session_seen', TS_B, { claude_session_id: 'csid-1' }));
+      assert.equal(p.sessions[SID].created_at, TS_B);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // session_prune — tombstone. The event log is append-only, so "delete" is a
+  // reducer behaviour, not a log rewrite.
+  // -------------------------------------------------------------------------
+
+  describe('reduceSessionPrune (tombstone)', () => {
+    it('removes the record from the projection', () => {
+      const p = emptyProjection();
+      applyEvent(p, evt('session_seen', TS_A, { claude_session_id: 'csid-1' }));
+      assert.ok(p.sessions[SID]);
+      applyEvent(p, evt('session_prune', TS_B, { reason: 'ghost' }, 'b'));
+      assert.equal(p.sessions[SID], undefined);
+    });
+
+    it('still accounts for the event in _meta', () => {
+      // Consumers use event_count to detect projection drift; a tombstone that
+      // did not count would make a healthy projection look stale.
+      const p = emptyProjection();
+      applyEvent(p, evt('session_seen', TS_A, { claude_session_id: 'csid-1' }));
+      applyEvent(p, evt('session_prune', TS_B, {}, 'b'));
+      assert.equal(p._meta.event_count, 2);
+      assert.equal(p._meta.last_event_id, `evt_test-${TS_B}-b`);
+    });
+
+    it('replay reproduces the pruned state exactly', () => {
+      // This is the property that lets `rebuild` be safe after a prune: the
+      // record must stay gone when the whole log is folded again.
+      const events = [
+        evt('session_seen', TS_A, { claude_session_id: 'csid-1' }),
+        { ...evt('session_seen', TS_A, { claude_session_id: 'csid-2' }, 'keep'), stable_id: SID_2 },
+        evt('session_prune', TS_B, { reason: 'ghost' }, 'b'),
+      ];
+      const rebuilt = rebuildFromEvents(events);
+      assert.equal(rebuilt.sessions[SID], undefined, 'pruned record must stay gone');
+      assert.ok(rebuilt.sessions[SID_2], 'other records must be untouched');
+      // Folding twice is stable too.
+      const twice = rebuildFromEvents([...events, ...events]);
+      assert.equal(twice.sessions[SID], undefined);
+      assert.ok(twice.sessions[SID_2]);
+    });
+
+    it('is idempotent — pruning an absent record does not throw', () => {
+      const p = emptyProjection();
+      applyEvent(p, evt('session_prune', TS_A, {}));
+      applyEvent(p, evt('session_prune', TS_B, {}, 'b'));
+      assert.equal(p.sessions[SID], undefined);
+      assert.equal(p._meta.event_count, 2);
+    });
+
+    it('a later event for a pruned stable_id rebuilds it from scratch', () => {
+      // Deliberate semantics: the tombstone says "garbage as of this point in
+      // the log". Real activity afterwards is real, and must not be silently
+      // discarded by a stale tombstone.
+      const p = emptyProjection();
+      applyEvent(p, evt('session_seen', TS_A, {
+        claude_session_id: 'csid-1',
+        first_prompt_preview: 'old',
+      }));
+      applyEvent(p, evt('session_prune', TS_B, {}, 'b'));
+      applyEvent(p, evt('session_seen', TS_C, {
+        claude_session_id: 'csid-2',
+        first_prompt_preview: 'new',
+      }, 'c'));
+      assert.ok(p.sessions[SID], 'post-tombstone activity resurrects the record');
+      assert.deepEqual(p.sessions[SID].claude_session_ids, ['csid-2'],
+        'the resurrected record starts clean — no pre-tombstone state leaks back');
+      assert.equal(p.sessions[SID].first_prompt_preview, 'new');
+      assert.equal(p.sessions[SID].created_at, TS_C);
+    });
+
+    // -----------------------------------------------------------------------
+    // Version skew — a documented hazard, pinned so the documentation cannot
+    // quietly stop being true.
+    //
+    // The README used to claim that an older reader treats every new 0.2.0 op
+    // as a no-op. That is right for `session_progress` and WRONG for
+    // `session_prune`: `applyEvent` eagerly creates the session record before
+    // dispatching on the op, and only 0.2.0+ knows to delete it again. An
+    // older reducer therefore RESURRECTS every pruned record — dated to the
+    // tombstone's ts, so it also looks more recently active than it ever was
+    // — and `rebuild` persists that. Nothing detects it: `schema_version`
+    // stays 2 and no shipped reader compares it anyway.
+    //
+    // The stand-in below is `applyEvent` minus the two lines that make
+    // tombstones work, which is exactly what a pre-0.2.0 reducer is. If a
+    // future change makes tombstones survive an old reader, this test fails
+    // and the README's "Version skew" section needs rewriting with it.
+    // -----------------------------------------------------------------------
+    it('an old reducer (no prune case) resurrects the record — README "Version skew"', () => {
+      const preTombstoneApply = (projection, event) => {
+        const { op, stable_id: stableId, ts } = event;
+        let session = projection.sessions[stableId];
+        if (!session) {
+          session = emptySession(stableId, ts);
+          projection.sessions[stableId] = session;
+        }
+        if (op === 'session_seen') {
+          const p = event.payload ?? {};
+          if (p.claude_session_id) session.claude_session_ids.push(p.claude_session_id);
+          if (p.first_prompt_preview) session.first_prompt_preview = p.first_prompt_preview;
+        }
+        // No `case 'session_prune'`, and no `op !== 'session_prune'` guard —
+        // an unknown op falls through to the activity bump.
+        if (op !== 'sweep' && ts && (!session.last_progress_at || ts > session.last_progress_at)) {
+          session.last_progress_at = ts;
+        }
+        projection._meta.event_count += 1;
+        return projection;
+      };
+
+      const events = [
+        evt('session_seen', TS_A, { claude_session_id: 'csid-1', first_prompt_preview: 'real' }),
+        evt('session_prune', TS_D, { reason: 'ghost' }, 'b'),
+      ];
+
+      const current = rebuildFromEvents(events);
+      assert.equal(current.sessions[SID], undefined, 'the current reducer honours the tombstone');
+
+      const old = emptyProjection();
+      for (const e of events) preTombstoneApply(old, e);
+      assert.ok(old.sessions[SID], 'an old reducer brings the pruned record back');
+      assert.equal(old.sessions[SID].last_progress_at, TS_D,
+        'and dates it from the tombstone, i.e. more recent than it ever really was');
+    });
+  });
 });

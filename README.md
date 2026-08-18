@@ -96,15 +96,26 @@ sessions-db link-parent sess_child sess_parent
 sessions-db close sess_xxx --outcome done --reason "shipped"
 sessions-db rebuild                            # rebuild projection from events
 sessions-db sweep --dry-run                    # preview activity transitions
+sessions-db prune                              # report never-used sessions (DRY RUN)
+sessions-db prune --yes                        # actually remove them
 ```
+
+`prune` refuses to delete when its scan of `~/.claude/projects` comes back
+empty or reports an error, and names the root it read. That scan is the
+only criterion distinguishing a real session nobody resumed from a ghost,
+so an empty one would make every never-resumed session look prunable —
+the realistic causes are `sudo` / cron / containers changing `HOME`, or a
+typo'd `DRUUMEN_CLAUDE_PROJECTS_ROOT`. A dry run still reports, flagged
+`disk_scan.trusted: false`. `--accept-untrusted-scan` overrides the
+refusal for a machine that genuinely holds no transcripts.
 
 The CLI is the same surface as the library API; both write through the
 same primitives, so a workflow that mixes hook-driven CLI commands with
 programmatic library calls observes a consistent projection.
 
-### Hook setup (Claude Code SessionStart)
+### Hook setup (Claude Code)
 
-Add to your `~/.claude/settings.json`:
+Two hooks, and you want **both**. Add to your `~/.claude/settings.json`:
 
 ```json
 {
@@ -115,20 +126,40 @@ Add to your `~/.claude/settings.json`:
         "command": "node /absolute/path/to/node_modules/@druumen/sessions-db/cli/sessions-db-session-start.mjs",
         "timeout": 5
       }]
+    }],
+    "UserPromptSubmit": [{
+      "matcher": ".*",
+      "hooks": [{
+        "type": "command",
+        "command": "node /absolute/path/to/node_modules/@druumen/sessions-db/cli/sessions-db-user-prompt.mjs",
+        "timeout": 5
+      }]
     }]
   }
 }
 ```
 
-The hook is bootstrap-safe by design:
+**Why both.** `SessionStart` fires when a Claude Code process comes up, which is
+before the user has said anything — it cannot know the first prompt, and most of
+the processes it sees (daemon warm-pool, IDE panel spawns) are never spoken to
+at all. `UserPromptSubmit` is what supplies the first prompt, advances the
+progress timestamp on every turn, and promotes a session from "a process
+started" to "somebody is working here". Without it you get records with a null
+preview and a progress time frozen at creation — the pre-0.2.0 behaviour.
 
-- Kill switch: set `DRUUMEN_SESSIONS_DB_DISABLED=1` to no-op the hook
-  without removing it from settings.
-- 2-second hard timeout on every operation; the hook always exits 0 so
-  it never blocks Claude Code start, even on disk full / permission
-  denied / lockfile contention.
-- Errors are logged to stderr (visible in Claude Code's session log)
-  but never surfaced as user-facing failures.
+Registering only `SessionStart` is safe (deferral is gated on the prompt hook
+having actually run, so nothing is silently dropped), just not useful.
+
+Both hooks are bootstrap-safe by design:
+
+- Kill switch: set `DRUUMEN_SESSIONS_DB_DISABLED=1` to no-op both hooks
+  without removing them from settings.
+- Hard timeout on every operation — 2 s for `SessionStart`, 1 s for
+  `UserPromptSubmit` (it runs on every turn, in front of the user). Both always
+  exit 0, so neither blocks Claude Code even on disk full / permission denied /
+  lockfile contention.
+- Nothing is ever written to stderr; a hook that cannot do its job does
+  nothing, visibly to no one.
 
 #### Subpath imports `./cli` and `./hook` are ESM-only
 
@@ -242,10 +273,49 @@ truth; the projection (`sessions-db.json`) is a derivable cache. Run
 `sessions-db rebuild` at any time to regenerate the projection from
 events — useful after manual events-log inspection / surgery.
 
-`schema_version: 2` is the stable contract for the entire 0.1.x line.
-Reducers stay backward-compatible: new optional fields may appear in
-0.1.x minor releases, but no existing field is removed or repurposed.
-Schema-breaking changes (rename, type change, removal) ship at 0.2.0+.
+`schema_version: 2` is still the contract in 0.2.0 — the release adds
+event ops (`session_progress`, `session_prune`) and honours a new
+optional `created_at` payload field, but removes and repurposes nothing.
+
+### Version skew: an old reader RESURRECTS pruned records
+
+An older reader folding a 0.2.0 log tolerates `session_progress` as an
+unknown op (no-op, still counted toward `event_count`). `session_prune`
+is different, and calling it a no-op would be wrong: the reducer creates
+the session record for *any* op before dispatching on it, and only
+0.2.0+ knows to delete it again. Folding a pruned log with a pre-0.2.0
+reducer therefore brings every tombstoned record back — with
+`last_progress_at` set to the tombstone's timestamp, i.e. looking *more*
+recently active than it ever was.
+
+That is harmless for a read-only reader, but `rebuild` **saves**:
+
+```bash
+npx @druumen/sessions-db@0.1.7 rebuild   # silently un-prunes every record
+```
+
+There is no version guard to catch this — `schema_version` is written
+but nothing gates on it, and it stays `2` either way. So:
+
+- **Do not run an older version's `rebuild`** against a database that has
+  been pruned. Pin one version per machine (`npx -y @druumen/sessions-db@0.2.0`,
+  or a local install) rather than mixing.
+- If it happens, it is recoverable: re-run `sessions-db prune --yes` with
+  a current version. The tombstones are still in `events.jsonl` — the
+  original observations are never rewritten — but a fresh prune is what
+  reconciles the projection, and the resurrected records will have to
+  clear the criteria again.
+- `schema_version` was deliberately **not** bumped for this: nothing in
+  any shipped reader compares it, so a bump would break the typed
+  `schema_version: 2` contract and the documented 0.4.0 migration plan
+  while changing no behaviour. Documenting the skew is the honest fix.
+
+The pending area (`sessions-db-pending/`) is deliberately NOT part of the
+schema: it is a staging buffer of throwaway files, safe to delete at any
+time. Deleting a staged record loses only the precise session-start
+timestamp of a session that has not been used yet; deleting the
+`.promoter` marker just makes `SessionStart` record eagerly again until
+the prompt hook next runs.
 
 ## Versioning
 
@@ -268,13 +338,16 @@ Apache 2.0 — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
 
 ## Roadmap
 
-- **0.1.0** (current): Library + CLI + hook + 3-priority identity +
+- **0.1.x**: Library + CLI + `SessionStart` hook + 3-priority identity +
   cross-platform (macOS / Linux verified in CI; Windows pending runner) +
   privacy opt-out (`storeFirstPrompt: false` /
-  `DRUUMEN_SESSIONS_DB_STORE_PREVIEW=0`).
-- **0.2.0** (TBD): parent_candidate auto-promote heuristic, outcome
+  `DRUUMEN_SESSIONS_DB_STORE_PREVIEW=0`) + free-text `search`.
+- **0.2.0** (current): `UserPromptSubmit` hook (real first-prompt preview,
+  live progress timestamps, branch drift), deferral of never-used sessions
+  so ghosts are not created, and `prune` to clear historical ones.
+- **0.3.0** (TBD): parent_candidate auto-promote heuristic, outcome
   auto-derive on `/task-done` linkage.
-- **0.3.0** (TBD): Multi-machine sync (schema_version=3 break,
+- **0.4.0** (TBD): Multi-machine sync (schema_version=3 break,
   documented migration).
 - **0.4.0+** (TBD): Web UI / VS Code Sessions panel via
   [Druumen Cockpit](https://druumen.com).

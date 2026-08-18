@@ -1304,6 +1304,140 @@ describe('sessions-db-session-start.mjs (hook integration)', () => {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // Transcript-location fallback. Layer 3 used to be "newest .jsonl in the
+  // workspace dir, by mtime" — a guess that was safe only because
+  // `workspaceHashFromCwd` mis-encoded paths containing '_' / space / '~' /
+  // non-ASCII, so the directory was never found. Fixing the hash (0.1.7)
+  // armed the guess against a directory that on real machines holds 200+
+  // transcripts belonging to other sessions.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Plant a `<HOME>/.claude/projects/<hash>/` directory containing transcripts
+   * that belong to OTHER sessions, newest last so an mtime-ordered fallback
+   * would pick a specific, identifiable stranger.
+   */
+  function plantForeignTranscripts(home, cwd, foreignSids) {
+    const hash = cwd.replace(/[^a-zA-Z0-9]/g, '-');
+    const dir = join(home, '.claude', 'projects', hash);
+    mkdirSync(dir, { recursive: true });
+    const paths = [];
+    for (const sid of foreignSids) {
+      const p = join(dir, `${sid}.jsonl`);
+      writeFileSync(p, [
+        JSON.stringify({
+          type: 'user',
+          uuid: `uuid-first-${sid}`,
+          parentUuid: null,
+          sessionId: sid,
+          cwd,
+          gitBranch: 'main',
+          userType: 'external',
+          message: { role: 'user', content: `FOREIGN PROMPT from ${sid}` },
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          uuid: `uuid-last-${sid}`,
+          parentUuid: `uuid-first-${sid}`,
+          sessionId: sid,
+          message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+        }),
+      ].join('\n') + '\n');
+      paths.push(p);
+    }
+    return { dir, paths };
+  }
+
+  it('fallback: a session with no transcript of its own never adopts a stranger', async () => {
+    // The falsification: with the old mtime fallback this session picks up
+    // another session's transcript — that path lands in transcript_files[],
+    // that session's first prompt becomes OUR preview, and its first_uuid /
+    // last_uuid feed the lineage matcher, which can then merge two unrelated
+    // sessions into one stable_id. Correct behaviour is to find nothing.
+    const ws = makeFakeWorkspace({ prefix: 'hook-foreign-transcript-' });
+    try {
+      plantForeignTranscripts(ws, ws, [
+        '99999999-1111-1111-1111-111111111111',
+        '99999999-2222-2222-2222-222222222222',
+        '99999999-3333-3333-3333-333333333333',
+      ]);
+
+      const r = await runHook({
+        cwd: ws,
+        // No transcript_path, and no `<hash>/<FAKE_SID>.jsonl` on disk.
+        stdin: JSON.stringify({ session_id: FAKE_SID, cwd: ws }),
+        env: { HOME: ws },
+      });
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+
+      // No promoter marker exists in this fixture, so the hook records eagerly
+      // rather than deferring (the documented fail-safe). That is convenient
+      // here: it gives us the event to inspect, which is a stronger assertion
+      // than "nothing was written".
+      const eventsPath = join(ws, 'tickets', '_logs', 'sessions-db-events.jsonl');
+      const raw = existsSync(eventsPath) ? readFileSync(eventsPath, 'utf8') : '';
+      const events = raw.trim().length > 0
+        ? raw.trim().split('\n').map((l) => JSON.parse(l))
+        : [];
+      for (const e of events) {
+        assert.equal(e.payload.transcript_file, null,
+          'must not attach any transcript — none belongs to this session');
+        assert.equal(e.payload.first_prompt_preview, null,
+          'must not inherit a stranger\'s first prompt as our preview');
+      }
+      assert.equal(raw.includes('FOREIGN PROMPT'), false,
+        'no part of a foreign transcript may reach events.jsonl');
+      assert.equal(raw.includes('99999999-'), false,
+        'no foreign session id may reach events.jsonl');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('fallback: the session DOES find its own transcript under a drifted hash', async () => {
+    // The half of the old fallback worth keeping: tolerance for the transcript
+    // living under a different workspace hash than the cwd we were handed.
+    // Layer 3 scans every workspace dir but matches only on the exact csid.
+    const ws = makeFakeWorkspace({ prefix: 'hook-hash-drift-' });
+    try {
+      // Strangers under the cwd's own hash...
+      plantForeignTranscripts(ws, ws, ['99999999-4444-4444-4444-444444444444']);
+      // ...and OUR transcript under a completely different workspace dir.
+      const otherDir = join(ws, '.claude', 'projects', '-some-other-workspace');
+      mkdirSync(otherDir, { recursive: true });
+      const ours = join(otherDir, `${FAKE_SID}.jsonl`);
+      writeFileSync(ours, JSON.stringify({
+        type: 'user',
+        uuid: 'uuid-ours-1',
+        parentUuid: null,
+        sessionId: FAKE_SID,
+        cwd: ws,
+        gitBranch: 'main',
+        userType: 'external',
+        message: { role: 'user', content: 'OUR OWN PROMPT' },
+      }) + '\n');
+
+      const r = await runHook({
+        cwd: ws,
+        stdin: JSON.stringify({ session_id: FAKE_SID, cwd: ws }),
+        env: { HOME: ws },
+      });
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+
+      const events = readFileSync(
+        join(ws, 'tickets', '_logs', 'sessions-db-events.jsonl'),
+        'utf8',
+      ).trim().split('\n').map((l) => JSON.parse(l));
+      assert.equal(events[0].op, 'session_seen');
+      assert.equal(events[0].payload.transcript_file.path, ours,
+        'must attach OUR transcript, found by exact csid in another dir');
+      assert.equal(events[0].payload.first_prompt_preview, 'OUR OWN PROMPT');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
   // MUST-PATCH 3 — kill switch must short-circuit BEFORE the dynamic
   // import fires, so a corrupted main module never gets a chance to throw.
   it('MUST-PATCH 3: kill switch exits 0 before importing main, even if main is unimportable', async () => {

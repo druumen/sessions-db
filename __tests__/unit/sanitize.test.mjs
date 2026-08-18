@@ -131,6 +131,86 @@ describe('sanitize.mjs', () => {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // Truncation cost.
+  //
+  // This function returns 200 characters, but it used to walk the entire input
+  // to get them: `Array.from(s)` materialises one array element per code point,
+  // so a 32 MB single-line paste cost ~442 ms and ~328 MB of heap. That was
+  // affordable while it ran once per session inside a 2 s budget; since 0.2.0
+  // it runs on every prompt inside a 1 s budget, on raw pasted text — and it is
+  // synchronous, so it consumes the whole ceiling with the hard timer unable to
+  // preempt it (an unref'd timer does not fire on a blocked event loop). A
+  // 32 MB paste measured 1994 ms end-to-end, twice the ceiling.
+  //
+  // The fix slices before materialising. Two things then need pinning: that the
+  // work is bounded, and — far more important — that the OUTPUT did not change,
+  // because `first_human_prompt_v1` hashes this exact string. A different
+  // truncation would silently re-key every fingerprint written from here on and
+  // break identity reconciliation against records already on disk.
+  // ---------------------------------------------------------------------------
+  describe('sanitizeFirstPrompt — bounded truncation cost', () => {
+    /** The pre-fix truncation, verbatim, as the equivalence oracle. */
+    function referenceTruncate(s, maxLen) {
+      if (s.length <= maxLen) return s;
+      const cps = Array.from(s);
+      if (cps.length <= maxLen) return s;
+      return cps.slice(0, Math.max(0, maxLen - 1)).join('') + '…';
+    }
+
+    const maxLen = 200;
+    const cases = {
+      'ascii just under the slice window': 'a'.repeat(maxLen * 4 - 1),
+      'ascii exactly at the slice window': 'a'.repeat(maxLen * 4),
+      'ascii just over the slice window': 'a'.repeat(maxLen * 4 + 1),
+      'ascii far past it': 'a'.repeat(maxLen * 40),
+      // Every code point is a surrogate pair, so the string is longer than
+      // maxLen in UTF-16 units while holding fewer than maxLen code points —
+      // the case where the "fits, return whole" branch must still win.
+      'all surrogate pairs, fewer code points than maxLen': '😀'.repeat(maxLen - 5),
+      'all surrogate pairs, more code points than maxLen': '😀'.repeat(maxLen * 3),
+      // A pair straddling the slice boundary: slicing by code units can cut it
+      // in half, so the result must not carry a lone surrogate.
+      'surrogate pair straddling the slice boundary': `${'a'.repeat(maxLen * 4 - 1)}😀${'b'.repeat(50)}`,
+      'mixed CJK and emoji': '中文😀'.repeat(maxLen),
+    };
+
+    for (const [name, input] of Object.entries(cases)) {
+      it(`output is byte-identical to the unbounded implementation — ${name}`, () => {
+        const out = sanitizeFirstPrompt(input, { maxLen });
+        assert.equal(out, referenceTruncate(input, maxLen));
+        // Well-formed UTF-16 either way: a round-trip through code points is
+        // lossless only when no surrogate was split.
+        assert.equal(Array.from(out).join(''), out);
+      });
+    }
+
+    it('materialises a bounded prefix, not the whole prompt', () => {
+      // Asserted by instrumenting Array.from rather than by timing: wall-clock
+      // thresholds turn into flakes on a loaded CI box, while "how much did you
+      // materialise" is exactly the property that regressed and is machine
+      // independent. The measured numbers live in the docstring above.
+      const input = 'z'.repeat(4 * 1024 * 1024);
+      const original = Array.from;
+      const seen = [];
+      try {
+        Array.from = function instrumented(arg, ...rest) {
+          if (typeof arg === 'string') seen.push(arg.length);
+          return original.call(Array, arg, ...rest);
+        };
+        const out = sanitizeFirstPrompt(input, { maxLen });
+        assert.equal(Array.from(out).length, maxLen);
+      } finally {
+        Array.from = original;
+      }
+      assert.ok(seen.length > 0, 'expected the truncation path to run');
+      for (const len of seen) {
+        assert.ok(len <= maxLen * 4,
+          `materialised ${len} code units for a ${maxLen}-char preview`);
+      }
+    });
+  });
+
   describe('sanitizeFirstPrompt — bypass defenses (codex round-1)', () => {
     it('strips opening tag with trailing whitespace (regex tolerance)', () => {
       // `<system-reminder >` with a trailing space used to slip past a

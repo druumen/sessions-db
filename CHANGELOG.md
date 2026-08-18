@@ -5,6 +5,264 @@ All notable changes to `@druumen/sessions-db` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-08-17
+
+Stop the database from filling with sessions nobody ever used, and start
+recording what actually happens inside the ones people do use.
+
+Measured on a reference database of 623 records before this release: 189
+sessions had `first_prompt_preview: null` permanently (of the 189 that resolved
+as `minted` — opened once, never resumed — only 4 ever got a preview), 187 had
+no transcript link at all, and 144 were records for processes that were never
+spoken to. `SessionStart` was the only writer and it runs strictly *before* the
+user says anything, so it was structurally incapable of knowing the first
+prompt; nothing else ever wrote, so `last_progress_at` stayed frozen at
+`created_at` and "sort by recent activity" actually sorted by "who got resumed".
+
+### Added
+
+- **`UserPromptSubmit` hook (`cli/sessions-db-user-prompt.mjs` + `-main.mjs`)** —
+  the second writer. Fires on every prompt submission and:
+  - latches `first_prompt_preview` from the hook payload's `prompt` field — no
+    transcript read, no waiting for a flush;
+  - advances `last_progress_at` on every turn;
+  - refreshes `branch_current` / `head_last_seen` (the only fields that
+    genuinely drift mid-session).
+
+  Honours the same six-item safety contract as the SessionStart hook (cwd-gate,
+  time budget, silent stderr, always exit 0, kill switch, shared git probe),
+  with a **1000 ms** hard ceiling instead of 2000 ms because it sits on the
+  user's per-turn latency path. Measured end-to-end p95: **136 ms** against the
+  623-session / 1.35 MB reference projection (target was 200 ms).
+
+- **`session_progress` EventOp** — the per-turn heartbeat.
+  `first_prompt_preview` is first-write-wins (last-write-wins would leave every
+  session titled "ok" or "continue"); `branch_current` / `head_last_seen` are
+  last-write-wins.
+
+- **`session_prune` EventOp + `sessions-db prune`** — removes ghost records.
+  **Dry run by default**; `--yes` is required to write. A record is removed only
+  when ALL of these hold: empty `first_prompt_preview`, both fingerprints null,
+  empty `ai_title`, no transcript on disk for any of its `claude_session_ids`,
+  `created_at` older than `--older-than` (default `1h`), and no operator intent
+  attached (no alias / parent / child / task / project link, `outcome` still
+  `open`). Append-only: a tombstone event is written and the reducer drops the
+  record, so `rebuild` reproduces the pruned state and the original
+  observations stay readable.
+
+- **Pending area (`lib/pending.mjs`)** — `<storage-root>/sessions-db-pending/`,
+  one small file per staged session, plus a `.promoter` liveness marker. See
+  "Changed" below.
+
+- **`gitContextFast` (lib/git-context.mjs)** — one-spawn git probe returning
+  worktree root + HEAD + branch from a single
+  `git rev-parse --show-toplevel HEAD --abbrev-ref HEAD`. Measured p50 5.9 ms /
+  p95 6.3 ms versus p50 73 ms / p95 109 ms for the six-probe `gitContext`.
+  Argument order is load-bearing (`--abbrev-ref` applies to every rev that
+  follows it) and is pinned by a regression test.
+
+- **`findTranscriptByCsid` / `indexTranscriptCsids` (lib/transcript.mjs)** —
+  exact-identity transcript discovery across every workspace directory, and the
+  bulk index `prune` uses.
+
+- **`lib/hook-common.mjs`** — the cwd-gate, stdin parsing, id validation,
+  privacy-opt-out predicate and storage-target resolver, lifted out of the
+  SessionStart main so both hooks share one implementation. A disagreement
+  between the two would mean one hook writing to a workspace the user never
+  opted into, or promotion never finding its staged record.
+
+### Changed
+
+- **`SessionStart` no longer records unconditionally.** Claude Code 2.1.x keeps
+  a daemon warm-pool (`claude bg-spare` / `bg-pty-host`) and the IDE panel
+  spawns its own processes; each mints a session id and trips the hook, and
+  most are never spoken to (11 of 13 records created on one measured day). The
+  hook now writes an event only when it has positive evidence the session is
+  real — either the transcript already contains a human prompt (resume /
+  continue / compact), or the `claude_session_id` is already in the projection.
+  Otherwise it stages a small record in the pending area and exits without
+  touching the lock, the projection, or `events.jsonl`; the first
+  `UserPromptSubmit` promotes it.
+
+  A pending area was chosen over a `provisional: true` flag on the grounds of
+  the lock, not the schema: `recordSessionSeen` holds the projection lock across
+  load → resolveIdentity → append → apply → save (~33 ms p95 on the reference
+  database) and it is the only writer that concurrent hooks contend for.
+  Deferring removes that acquisition entirely for the ghost case, so warm-pool
+  spawns stop competing with sessions that are working. A provisional flag would
+  have kept every ghost inside the critical section and added a second lock
+  cycle to clear the flag.
+
+- **`created_at` is now earliest-wins** on `session_seen`. A promotion replays
+  the deferred observation time so the record dates from process start rather
+  than from the first prompt. Monotone-decreasing, so it stays
+  order-independent and replay-stable.
+
+- **`npm test` runs in two phases** — library/CLI suites in parallel, then the
+  two hook integration suites with `--test-concurrency=1`. Those suites spawn
+  real hook processes that carry real wall-clock ceilings (1 s / 2 s); when they
+  competed with 140 other suites for 12 cores a hook would occasionally exceed
+  its ceiling, exit 0 without writing (correct production behaviour), and fail
+  the assertion that followed. Observed durations of 2.3–4.8 s for invocations
+  that normally take ~300 ms. Total runtime is unchanged (~14 s) and the suite
+  is now deterministic across repeated runs.
+
+### Fixed
+
+- **The transcript-location fallback no longer guesses.** Layer 3 of
+  `locateTranscript` was "newest `.jsonl` in the workspace dir, by mtime". That
+  was safe only by accident: the pre-0.1.7 `workspaceHashFromCwd` mis-encoded
+  any path containing `_`, a space, `~`, or non-ASCII, so the directory was
+  never found and the fallback returned nothing. Fixing the hash in 0.1.7 armed
+  the guess — the directory now resolves, and on a real machine it holds 206
+  transcripts belonging to other sessions. A wrong path lands in
+  `transcript_files[]` and feeds `first_uuid` / `last_uuid` into the
+  `transcript_lineage` matcher, which can merge two unrelated sessions into one
+  stable_id. Layer 3 is now an exact `<claude_session_id>.jsonl` lookup across
+  every workspace directory: it keeps the tolerance for hash/cwd drift and drops
+  the recency guess. Both halves are pinned by tests, including a negative
+  mutation run confirming the old heuristic fails them.
+
+- **`prune` refuses to delete when the transcript scan proved nothing.**
+  "No transcript on disk" is the ONLY criterion separating a real session
+  nobody ever resumed from a ghost — a record written by 0.1.7's `SessionStart`
+  has no preview, no fingerprint and no `ai_title` either. `indexTranscriptCsids`
+  returns a well-formed empty result on any failure (by design, for its other
+  callers) and nothing read its `errors` channel, so an empty scan silently
+  satisfied that criterion for every record. Measured against a copy of the
+  reference database (628 records): the real transcript root yielded 151
+  candidates, an existing-but-empty directory yielded 192, and a non-existent
+  directory also yielded 192 — the extra 41 in both cases were real sessions
+  with real human questions. `sudo sessions-db prune --yes` (HOME becomes
+  `/var/root`), a launchd/cron job, a container, a typo'd
+  `DRUUMEN_CLAUDE_PROJECTS_ROOT` or a macOS TCC blip all produce exactly that
+  scan. A real run now stops with an actionable message naming the root it
+  scanned; a dry run still reports but marks the scan untrusted (`disk_scan.trusted`,
+  and a warning above the candidate list). `--accept-untrusted-scan` is the
+  escape hatch for a machine that genuinely has no transcripts. New export:
+  `assessScanTrust`; `indexTranscriptCsids` now also returns the `root` it read.
+
+- **A prompt for a session with no pending record and no projection entry is
+  now recorded instead of dropped.** `lib/pending.mjs` states that losing a
+  pending file "degrades to exactly the pre-existing behaviour (the session
+  gets recorded on its first prompt, with `created_at` set to that moment)",
+  and `PENDING_MAX_AGE_MS` justifies its 24 h GC on that basis. Neither was
+  true: the prompt hook exited without writing when it found neither, and
+  since the pending file stays gone, every later prompt of that session exited
+  too — the session was never recorded anywhere. Two ordinary ways in: the
+  staged file failing to write or being removed, and a session left open for
+  more than 24 h before its first prompt ("open the tab Friday, type Monday").
+  The old objection — "either an untracked workspace or a race with
+  SessionStart" — does not hold: the cwd-gate has already run, and
+  `recordSessionSeen` reconciles races under the projection lock by csid index.
+  Such records carry `minted_from_prompt: true` in the event payload.
+
+- **`SessionStart` checks whether staging actually succeeded.** `writePending`
+  swallows its errors by contract (full disk, read-only FS, EPERM) and its
+  return value was ignored, so a failed staging deferred a session with
+  nothing on disk to promote. It now falls back to recording eagerly — the
+  pre-0.2.0 behaviour, i.e. a ghost at worst.
+
+- **The `.promoter` marker is now cross-examined once it goes stale.** The
+  30-day window is right for "is the hook configured?", but it left a 30-day
+  blind spot for the exact failure it exists to catch: removing the
+  `UserPromptSubmit` registration while staying on 0.2.0 kept a "fresh" marker,
+  so `SessionStart` deferred every session into a void for a month. A live
+  promoter refreshes the marker hourly, so a marker untouched for 6 h with at
+  least 3 sessions staged behind it (each ≥ 1 h old) is now treated as dead and
+  the marker is retired — retired rather than ignored, because the evidence
+  itself expires at `PENDING_MAX_AGE_MS` and the answer would otherwise
+  oscillate. Self-healing: the next real prompt-hook run recreates it. Ghost
+  stagings from before the marker went quiet do not count, so a healthy
+  machine's warm-pool records cannot trip it.
+
+- **The per-turn heartbeat no longer logs a preview of every prompt.**
+  `session_progress` carried `first_prompt_preview` on every turn; the reducer
+  discards all but the first (first-write-wins), so the only effect was
+  persisting a 200-character excerpt of every prompt into the append-only log.
+  Before 0.2.0 only the first prompt of a *resumed* session was ever stored, so
+  this was an unannounced widening of what lands on disk. The preview is now
+  sent only when the record does not have one yet — which still covers the case
+  it exists for (a session that predates this hook).
+
+- **`UserPromptSubmit` no longer anchors storage on an arbitrary cwd.**
+  `gitContextFast` collapses every non-zero git exit into `not_a_repo` +
+  `worktreePath: null`, and that includes `fatal: detected dubious ownership`
+  on shared/mounted checkouts. The hook then fell back to `workspaceRoot = cwd`
+  and created a second database wherever the user happened to be — reproduced
+  as a stray `packages/deep/app/tickets/_logs/sessions-db-pending/.promoter`
+  appearing in `git status`. Without a worktree root it now proceeds only when
+  the target is already an established storage root (explicit
+  `DRUUMEN_SESSIONS_DB_ROOT`, or a cwd that holds the database), and otherwise
+  bails like `SessionStart` does.
+
+- **`sanitizeFirstPrompt` no longer materialises the whole prompt** to produce
+  200 characters. `Array.from(s)` allocated one array element per code point:
+  a 32 MB single-line paste cost ~442 ms and ~328 MB of heap, and the hook that
+  now calls it runs on every turn inside a 1 s ceiling, synchronously, on raw
+  pasted input (measured 1994 ms end-to-end for that paste). It slices to
+  `maxLen * 4` code units first. Output is byte-identical — pinned against the
+  previous implementation across surrogate-pair boundaries — so
+  `first_human_prompt_v1` fingerprints written before and after this change
+  still match.
+
+- **`findTranscriptByCsid` validates its id before joining it into a path.**
+  It is exported from `lib/index.mjs` and interpolates the id into
+  `<root>/<dir>/<id>.jsonl`; `findTranscriptByCsid('../../secret')` escaped the
+  projects root. Not reachable through the hooks (they validate first), and its
+  neighbour in `pending.mjs` already gated the identical input for the
+  identical reason.
+
+- **Documented that the hook time budgets bound async stalls only.** An unref'd
+  timer cannot preempt a blocked event loop, so synchronous IO on a wedged
+  mount (NFS / SMB / sshfs / FUSE) runs straight past the 1 s / 2 s ceilings —
+  reproduced by making the cwd-gate's `CLAUDE.md` a FIFO with no writer, where
+  the process ran to SIGKILL and the timer never fired. The docstrings said
+  "hard timeout"; they now say what is actually guaranteed.
+
+- **Documented the `session_prune` version-skew hazard** (README, "Version
+  skew"). The claim that an older reader treats the new ops as no-ops is right
+  for `session_progress` and wrong for `session_prune`: `applyEvent` creates
+  the session record before dispatching on the op, so a pre-0.2.0 reducer
+  resurrects every pruned record — dated to the tombstone's timestamp — and
+  `npx @druumen/sessions-db@0.1.7 rebuild` persists that silently.
+  `schema_version` stays `2` because no shipped reader compares it (a bump
+  would change no behaviour while breaking the typed contract and the
+  documented 0.4.0 migration); the hazard is documented and pinned by a test
+  instead.
+
+### Hook registration
+
+`UserPromptSubmit` must be registered separately — installing 0.2.0 does not
+wire it up. In `~/.claude/settings.json`, alongside the existing `SessionStart`
+entry:
+
+```jsonc
+"UserPromptSubmit": [
+  {
+    "matcher": ".*",
+    "hooks": [
+      { "type": "command",
+        "command": "node '<path-to>/@druumen/sessions-db/cli/sessions-db-user-prompt.mjs'" }
+    ]
+  }
+]
+```
+
+**Upgrading without registering it is safe but pointless.** Deferral is gated on
+promoter liveness: `SessionStart` defers only when it can see that the prompt
+hook has actually run against this storage root (the `.promoter` marker, valid
+30 days, and discredited earlier than that if sessions pile up unpromoted
+behind a stale one — see "Fixed"). On a machine where only `SessionStart` is
+registered, nothing ever writes that marker, so the hook keeps its pre-0.2.0
+always-record behaviour — ghosts continue to accumulate, but no session is ever
+lost. The failure mode this avoids is the dangerous one: deferring into a void
+and silently recording nothing at all.
+
+Consequence worth knowing: the first session in a given storage root after
+installing is recorded eagerly, because no promoter has announced itself yet.
+From the second session onward, deferral is active.
+
 ## [0.1.7] — 2026-06-04
 
 Add a free-text `search` subcommand so AI tools (and humans) can locate the

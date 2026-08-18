@@ -63,18 +63,26 @@ export type IdentityConfidence = "exact" | "high" | "low" | "minted";
  * events.jsonl op label. Each op has its own reducer in
  * `lib/projection.mjs` (`reduceSessionSeen`, `reduceSessionLink`, …).
  *
- *   session_seen   — primary observation (created + every SessionStart)
- *   session_link   — additive: attach tasks/projects to a session
- *   session_unlink — set-based filter: detach tasks/projects (P5)
- *   alias_set      — set or clear human-readable alias
- *   parent_set     — set or clear parent_session_id
- *   close          — set outcome + closed_at + closed_reason
- *   sweep          — synthetic: activity_state transition (active → idle / archived)
- *   manual_link    — operator-supplied parent_candidate_ids merge
- *   ai_title_seen  — hook observation: latest `type:"ai-title"` record harvested
- *                    from the Claude Code transcript (last-write-wins; null clears)
+ *   session_seen     — primary observation (created + every SessionStart that
+ *                      is not deferred to the pending area)
+ *   session_progress — per-turn heartbeat from the `UserPromptSubmit` hook:
+ *                      latches `first_prompt_preview` (first-write-wins) and
+ *                      advances `last_progress_at` / `branch_current` /
+ *                      `head_last_seen` (last-write-wins)
+ *   session_link     — additive: attach tasks/projects to a session
+ *   session_unlink   — set-based filter: detach tasks/projects (P5)
+ *   alias_set        — set or clear human-readable alias
+ *   parent_set       — set or clear parent_session_id
+ *   close            — set outcome + closed_at + closed_reason
+ *   sweep            — synthetic: activity_state transition (active → idle / archived)
+ *   manual_link      — operator-supplied parent_candidate_ids merge
+ *   ai_title_seen    — hook observation: latest `type:"ai-title"` record harvested
+ *                      from the Claude Code transcript (last-write-wins; null clears)
+ *   session_prune    — tombstone: drop a never-used ghost record from the
+ *                      projection. Append-only — the prior events stay in
+ *                      events.jsonl and the reducer re-deletes on replay.
  */
-export type EventOp = "session_seen" | "session_link" | "session_unlink" | "alias_set" | "parent_set" | "close" | "sweep" | "manual_link" | "ai_title_seen";
+export type EventOp = "session_seen" | "session_progress" | "session_link" | "session_unlink" | "alias_set" | "parent_set" | "close" | "sweep" | "manual_link" | "ai_title_seen" | "session_prune";
 /**
  * One transcript file (`~/.claude/projects/<workspace-hash>/<uuid>.jsonl`)
  * as captured in a session's `transcript_files[]`.
@@ -166,6 +174,10 @@ export type ParentCandidate = {
  *  - `branch_at_start`, `head_at_start`, `first_prompt_preview` are
  *    first-write-wins (initial observation captures these and we refuse
  *    to overwrite to preserve history).
+ *  - `created_at` is earliest-wins: the default is the first observing
+ *    event's ts, but a promotion from the pending area replays the deferred
+ *    SessionStart time so the record dates from when the session actually
+ *    started, not from the first prompt.
  *  - `tasks[]` and `projects[]` are set-mutated by `session_link` (add) /
  *    `session_unlink` (remove).
  *  - `activity_state` is sweep-driven; `outcome` / `closed_at` /

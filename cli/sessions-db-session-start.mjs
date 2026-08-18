@@ -16,11 +16,18 @@
  *   2. DRUUMEN_SESSIONS_DB_DISABLED=1 kill switch. Exits before we even try
  *      to import the main module — useful for CI / docker / dev-offload
  *      sweeps that need to disable the hook without touching settings.json.
- *   3. setTimeout(2000, exit 0).unref(). The hard timeout. Now that no probe
- *      runs synchronously (git-context uses async spawn + global deadline,
- *      not spawnSync), this timer ACTUALLY fires when the event loop is
- *      otherwise busy. .unref() so a fast happy-path exits at natural
- *      completion without the timer keeping us alive.
+ *   3. setTimeout(2000, exit 0).unref(). The timeout — and it bounds ASYNC
+ *      stalls only. A timer, unref'd or not, cannot preempt a blocked event
+ *      loop, so it fires only while we are waiting on something async: a
+ *      hung git spawn, a contended lock, a slow projection read. Synchronous
+ *      work is NOT covered — a `readFileSync` on a wedged mount (NFS / SMB /
+ *      sshfs / an unresponsive external disk) or a long CPU pass blows
+ *      straight through it. Reproduced by pointing the cwd-gate at a FIFO
+ *      with no writer: the process sat until SIGKILL and this timer never
+ *      ran. The sync surface here is deliberately small (cwd-gate CLAUDE.md
+ *      read, transcript parse, pending IO) but it is not zero; treat the
+ *      budget as best-effort, not a guarantee. .unref() so a fast happy-path
+ *      exits at natural completion without the timer keeping us alive.
  *
  * Only AFTER all three are armed do we `import()` the real main. Any import
  * error (corrupt main module, missing file, ESM resolution failure) is
@@ -44,10 +51,10 @@ if (process.env.DRUUMEN_SESSIONS_DB_DISABLED === '1') {
   process.exit(0);
 }
 
-// (3) Hard timeout. Node built-in setTimeout, no import needed. .unref() so
-// the timer never keeps the event loop alive past the hook's natural
-// completion. With async git probes (no more spawnSync) this WILL fire when
-// some probe is truly stuck — see hook safety contract item 2.
+// (3) Timeout. Node built-in setTimeout, no import needed. .unref() so the
+// timer never keeps the event loop alive past the hook's natural completion.
+// Bounds async stalls (hung git spawn, contended lock) but NOT synchronous
+// ones — see the header note and hook safety contract item 2.
 setTimeout(() => process.exit(0), 2000).unref();
 
 // (4) NOW it is safe to import the real main. Any import-time failure
