@@ -46,11 +46,22 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
-  extractLatestAiTitle,
+  extractLatestTitles,
   findTranscriptByCsid,
   parseTranscriptFile,
   workspaceHashFromCwd,
 } from '../lib/transcript.mjs';
+import {
+  CHANNEL_AGENT_NAME,
+  CHANNEL_CC_AI_TITLE,
+  CHANNEL_CC_CUSTOM_TITLE,
+  SOURCE_HARVEST,
+  SOURCE_HUMAN,
+  SOURCE_LLM,
+  currentNameValue,
+  isValidNameValue,
+  nameSetPayload,
+} from '../lib/names.mjs';
 import { sanitizeFirstPrompt } from '../lib/sanitize.mjs';
 import {
   loadProjection,
@@ -304,35 +315,39 @@ async function main() {
     // SSoT is the durable record; rebuild reconciles everything later.
   }
 
-  // (11) AI-title ingestion. After the session_seen event has landed and we
-  // know the stable_id, tail-scan the transcript file(s) for the most recent
-  // `{"type":"ai-title", "aiTitle":"..."}` record. Claude Code persists its
-  // AI-generated session title there and re-emits it many times as the
-  // title is refined; the latest occurrence is what the `/resume` UI shows.
+  // (11) Name ingestion. After the session_seen event has landed and we know
+  // the stable_id, tail-scan the transcript for the most recent record of
+  // each naming kind Claude Code writes: `ai-title` (model-generated),
+  // `custom-title` (typed by the user) and `agent-name` (agent-team badge).
+  // All three are re-emitted as the session goes on; the latest occurrence of
+  // each is what its surface currently shows.
   //
-  // We separate this from the main `session_seen` payload because (a) the
-  // ai-title can change across SessionStart events for the same session,
-  // and (b) we want a dedicated audit op (`ai_title_seen`) so consumers
-  // can reason about the timeline of title changes independently from the
-  // main observation events.
+  // Until 0.3.0 only `ai-title` was collected, which meant the name carrying
+  // the STRONGEST intent — the one a person typed by hand — existed on disk,
+  // was rendered by cockpit on every refresh, and was then thrown away. It is
+  // now a channel like any other.
   //
-  // Spam suppression: only append `ai_title_seen` when the harvested title
-  // differs from what's already in the projection. This is best-effort
-  // (loadProjection happens outside the lock so there is a tiny race
-  // window with concurrent hooks for the same session), but the reducer is
-  // idempotent under last-write-wins so duplicates only cost log bytes,
-  // never correctness.
+  // We keep this separate from the main `session_seen` payload because (a) a
+  // name can change across SessionStart events for the same session, and (b) a
+  // dedicated op (`name_set`) gives consumers a timeline of renames
+  // independent of the observation events.
+  //
+  // Spam suppression: only append when a harvested value differs from what the
+  // projection already holds for that channel. Best-effort (loadProjection
+  // happens outside the lock, so there is a small race with a concurrent hook
+  // for the same session) but the reducer is idempotent, so a duplicate costs
+  // log bytes, never correctness.
   if (recordResult && recordResult.ok && typeof recordResult.stableId === 'string') {
     try {
-      await harvestAiTitle({
+      await harvestNames({
         stableId: recordResult.stableId,
         transcriptPath,
         recordTargetOpts,
       });
     } catch {
-      // Same exit-0 contract: ai_title ingestion is best-effort. A missing
-      // title doesn't degrade any existing capability — `find` falls back
-      // to alias / first_prompt_preview as before.
+      // Same exit-0 contract: name ingestion is best-effort. A missing
+      // title doesn't degrade any existing capability — the display name
+      // falls back down the chain to first_prompt_preview as before.
     }
   }
 
@@ -369,67 +384,86 @@ async function isKnownSession(claudeSessionId, recordTargetOpts) {
 }
 
 /**
- * Tail-scan `transcriptPath` for the most-recent `ai-title` record. If the
- * harvested title differs from the projection's current `ai_title` for
- * `stableId`, append an `ai_title_seen` event so the projection reflects
- * the latest known title.
+ * Tail-scan `transcriptPath` for the most-recent record of each naming kind
+ * and append a `name_set` event for every channel whose value changed.
  *
- * Why we pass `transcriptPath` instead of re-listing: the hook already
- * resolved the canonical transcript above (`locateTranscript`) and that
- * is the file Claude Code is actively writing into for THIS session. Any
- * older transcript files in the workspace dir are historical (we keep
- * them indexed in `transcript_files[]` but they're not where the current
- * ai-title gets emitted).
+ * Why `transcriptPath` and not a re-listing: the hook already resolved the
+ * canonical transcript above (`locateTranscript`) and that is the file Claude
+ * Code is actively writing for THIS session. Older transcript files in the
+ * workspace dir are historical — we keep them indexed in `transcript_files[]`
+ * but they are not where the current names get emitted.
+ *
+ * One event per changed channel. In the steady state that is zero events (the
+ * name has not changed since the last SessionStart) or one; three would mean
+ * all three surfaces changed at once, which is not a case worth batching for.
  *
  * No-op cases (all silent — hook exit-0 contract):
  *  - transcriptPath missing or null
- *  - tail window has no ai-title record (returns null)
- *  - projection load fails (we treat as "title differs from nothing yet")
- *  - title unchanged from projection
+ *  - tail window holds no naming record at all
+ *  - the value is unchanged from what the projection already has
+ *  - the value fails validation (see below)
+ *
+ * Over-long values are dropped rather than truncated. A truncated name is a
+ * name the user never chose, and storing one would also make every subsequent
+ * comparison a mismatch. The measured ceiling on this machine is 62
+ * characters against a 512-character cap, so this path is defensive, not hot.
  */
-async function harvestAiTitle({ stableId, transcriptPath, recordTargetOpts }) {
+async function harvestNames({ stableId, transcriptPath, recordTargetOpts }) {
   if (typeof transcriptPath !== 'string' || transcriptPath.length === 0) return;
   if (!existsSync(transcriptPath)) return;
 
-  const harvested = extractLatestAiTitle(transcriptPath);
-  if (!harvested || typeof harvested.aiTitle !== 'string' || harvested.aiTitle.length === 0) {
-    return;
-  }
+  const titles = extractLatestTitles(transcriptPath);
+  if (!titles) return;
 
-  // Load projection (best-effort) to compare against current ai_title. If
-  // load fails we still attempt the append — duplicate suppression is a
-  // nice-to-have, durability of the audit is the contract.
-  let currentTitle = null;
+  // Channel ← record kind ← authorship. `agent-name` is recorded as `harvest`
+  // rather than `human` or `llm`: it is assigned by the agent-team machinery,
+  // so neither a person nor a model authored it as a name. It is also
+  // deliberately outside the display chain (lib/names.mjs explains why —
+  // measured, it mirrors `ai_title` exactly).
+  const candidates = [
+    { channel: CHANNEL_CC_AI_TITLE, value: titles.aiTitle, source: SOURCE_LLM },
+    { channel: CHANNEL_CC_CUSTOM_TITLE, value: titles.customTitle, source: SOURCE_HUMAN },
+    { channel: CHANNEL_AGENT_NAME, value: titles.agentName, source: SOURCE_HARVEST },
+  ].filter((c) => typeof c.value === 'string' && c.value.length > 0 && isValidNameValue(c.value));
+  if (candidates.length === 0) return;
+
+  // One load for all three change checks. `currentNameValue` falls back to the
+  // legacy top-level fields, so a projection written before `names[]` existed
+  // does not look like "every name is new" and re-emit an event for all 355
+  // sessions that already have a title.
+  let session = null;
   try {
     const projection = await loadProjection(recordTargetOpts);
-    const session = projection && projection.sessions && projection.sessions[stableId];
-    if (session && typeof session.ai_title === 'string') {
-      currentTitle = session.ai_title;
-    }
+    session = (projection && projection.sessions && projection.sessions[stableId]) || null;
   } catch {
-    // ignore — fall through and emit
+    // ignore — a failed load only costs us duplicate suppression, and
+    // durability of the audit trail is the contract that matters.
   }
 
-  if (currentTitle === harvested.aiTitle) return; // no-op: same title
+  const observedAt = new Date().toISOString();
+  for (const { channel, value, source } of candidates) {
+    if (session && currentNameValue(session, channel) === value) continue;
 
-  const event = newEvent({
-    op: 'ai_title_seen',
-    stable_id: stableId,
-    payload: {
-      ai_title: harvested.aiTitle,
-      source_transcript: transcriptPath,
-      observed_at: new Date().toISOString(),
-    },
-  });
+    const event = newEvent({
+      op: 'name_set',
+      stable_id: stableId,
+      payload: nameSetPayload({
+        channel,
+        value,
+        source,
+        observedFrom: transcriptPath,
+        observedAt,
+      }),
+    });
 
-  // tryUpdateProjection holds the lock across append + apply + save, so
-  // concurrent hooks cannot clobber each other's ai_title write.
-  try {
-    await tryUpdateProjection(event, { ...recordTargetOpts, lockTimeoutMs: 1500 });
-  } catch {
-    // exit-0 — durability still ensured by tryUpdateProjection's
-    // SSoT-first ordering; even on lock contention the next hook fires
-    // would converge.
+    // tryUpdateProjection holds the lock across append + apply + save, so
+    // concurrent hooks cannot clobber each other's write.
+    try {
+      await tryUpdateProjection(event, { ...recordTargetOpts, lockTimeoutMs: 1500 });
+    } catch {
+      // exit-0 — durability is still ensured by tryUpdateProjection's
+      // SSoT-first ordering; the next hook converges.
+    }
   }
 }
 

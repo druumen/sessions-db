@@ -152,6 +152,47 @@ export function extractLatestAiTitle(path: string, opts?: {
     sessionId: string | null;
 } | null;
 /**
+ * Extract the most-recent record of EACH Claude Code naming kind from a
+ * transcript, in a single tail scan.
+ *
+ * Claude Code writes three kinds of naming record into the transcript jsonl,
+ * and until now the hook only ever collected one of them:
+ *
+ *   { "type": "ai-title",     "aiTitle":     "...", "sessionId": "..." }
+ *   { "type": "custom-title", "customTitle": "...", "sessionId": "..." }
+ *   { "type": "agent-name",   "agentName":   "...", "sessionId": "..." }
+ *
+ * `custom-title` is the one a human typed by hand — the strongest statement of
+ * intent any of the naming surfaces produces — and nothing was collecting it.
+ *
+ * ## Why one shared tail window is enough
+ *
+ * Same reasoning as `extractLatestAiTitle`, and measured rather than assumed.
+ * On the reference machine's 353 transcripts: `custom-title` appears in 6
+ * files and its last occurrence sits inside the 256 KiB tail in 6 of 6;
+ * `agent-name` in 7 files, 7 of 7. All three kinds are re-emitted as the
+ * session goes on (median 13 `custom-title` records per file that has any,
+ * max 435), which is what keeps a recent copy inside the window.
+ *
+ * Scanning once for all three costs exactly what scanning once for one did —
+ * the expensive part is the read, not the compare.
+ *
+ * @param {string} path absolute path to a Claude Code transcript jsonl
+ * @param {{ maxTailBytes?: number }} [opts]
+ * @returns {{ aiTitle: string|null, customTitle: string|null,
+ *   agentName: string|null, sessionId: string|null }|null}
+ *   `null` when the file is missing or empty. Individual fields are null when
+ *   the tail window holds no record of that kind.
+ */
+export function extractLatestTitles(path: string, opts?: {
+    maxTailBytes?: number;
+}): {
+    aiTitle: string | null;
+    customTitle: string | null;
+    agentName: string | null;
+    sessionId: string | null;
+} | null;
+/**
  * Maximum bytes scanned from the tail of a transcript when looking for the
  * latest `ai-title` record. Tuned at 256 KiB — large enough that any recent
  * ai-title (Claude Code emits these several KB apart in active sessions)

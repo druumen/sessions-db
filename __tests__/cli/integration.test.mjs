@@ -145,7 +145,7 @@ describe('sessions-db CLI — full lifecycle integration (spawn)', () => {
         'alias', SID_A, 'integration-test-A', '--root', root,
       ]);
       assert.equal(alias.exitCode, 0, `alias stderr: ${alias.stderr}`);
-      assert.match(alias.stdout, /ok: alias_set/);
+      assert.match(alias.stdout, /ok: name_set/);
 
       // ── 5. link --task on SID_A ──
       const link = await runCLI([
@@ -198,7 +198,8 @@ describe('sessions-db CLI — full lifecycle integration (spawn)', () => {
         return m;
       }, {});
       assert.equal(opCounts.session_seen, 2);
-      assert.equal(opCounts.alias_set, 1);
+      assert.equal(opCounts.name_set, 1);
+      assert.equal(opCounts.alias_set, undefined, 'no new writes use the legacy op');
       assert.equal(opCounts.session_link, 1);
       assert.equal(opCounts.parent_set, 1);
       assert.equal(opCounts.close, 1);

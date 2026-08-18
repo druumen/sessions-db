@@ -1470,3 +1470,151 @@ describe('sessions-db-session-start.mjs (hook integration)', () => {
     }
   });
 });
+
+/**
+ * Name harvesting — the three naming records Claude Code writes into the
+ * transcript. Before 0.3.0 the hook collected only `ai-title`, so the name a
+ * person typed by hand (`custom-title`) was rendered by cockpit on every
+ * refresh and then discarded.
+ */
+describe('sessions-db-session-start.mjs — name harvesting', () => {
+  const NAMED_SID = '99999999-aaaa-bbbb-cccc-999999999999';
+
+  /** Append Claude Code's naming records to a fake transcript. */
+  function appendTitles(transcriptPath, { aiTitle, customTitle, agentName } = {}) {
+    const lines = [];
+    if (aiTitle) lines.push(JSON.stringify({ type: 'ai-title', aiTitle, sessionId: NAMED_SID }));
+    if (customTitle) lines.push(JSON.stringify({ type: 'custom-title', customTitle, sessionId: NAMED_SID }));
+    if (agentName) lines.push(JSON.stringify({ type: 'agent-name', agentName, sessionId: NAMED_SID }));
+    if (lines.length === 0) return;
+    writeFileSync(transcriptPath, readFileSync(transcriptPath, 'utf8') + lines.join('\n') + '\n');
+  }
+
+  function readEvents(ws) {
+    const p = join(ws, 'tickets', '_logs', 'sessions-db-events.jsonl');
+    if (!existsSync(p)) return [];
+    return readFileSync(p, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  }
+
+  function readProjection(ws) {
+    return JSON.parse(readFileSync(join(ws, 'tickets', '_logs', 'sessions-db.json'), 'utf8'));
+  }
+
+  it('records all three naming channels with the right authorship', async () => {
+    const ws = makeFakeWorkspace({ prefix: 'hook-names-' });
+    try {
+      const transcriptPath = makeFakeTranscript(ws, NAMED_SID);
+      appendTitles(transcriptPath, {
+        aiTitle: 'Debug the flaky projection test',
+        customTitle: 'flaky test hunt',
+        agentName: 'side-session-refactor',
+      });
+
+      const r = await runHook({
+        cwd: ws,
+        stdin: JSON.stringify({ session_id: NAMED_SID, cwd: ws, transcript_path: transcriptPath }),
+        env: { HOME: ws },
+      });
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+      assert.equal(r.stderr, '');
+
+      const nameEvents = readEvents(ws).filter((e) => e.op === 'name_set');
+      const byChannel = Object.fromEntries(nameEvents.map((e) => [e.payload.channel, e.payload]));
+      assert.deepEqual(Object.keys(byChannel).sort(), ['agent_name', 'cc_ai_title', 'cc_custom_title']);
+
+      // source is authorship, not the collection route: all three arrived via
+      // the same harvest, but only one of them was typed by a person.
+      assert.equal(byChannel.cc_custom_title.value, 'flaky test hunt');
+      assert.equal(byChannel.cc_custom_title.source, 'human');
+      assert.equal(byChannel.cc_ai_title.source, 'llm');
+      assert.equal(byChannel.agent_name.source, 'harvest');
+      // Provenance survives, so a reader can go back to the file it came from.
+      assert.equal(byChannel.cc_custom_title.observed_from, transcriptPath);
+
+      const session = Object.values(readProjection(ws).sessions)[0];
+      assert.equal(session.ai_title, 'Debug the flaky projection test', 'legacy mirror still written');
+      // The hand-typed name outranks the generated one; agent_name is recorded
+      // but never displayed.
+      assert.equal(session.display_name, 'flaky test hunt');
+      assert.equal(session.display_name_channel, 'cc_custom_title');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('emits nothing on a second run when no name changed', async () => {
+    // Spam suppression is per channel. Without it every SessionStart would
+    // append three rows to an append-only log for a session nobody renamed.
+    const ws = makeFakeWorkspace({ prefix: 'hook-names-nochange-' });
+    try {
+      const transcriptPath = makeFakeTranscript(ws, NAMED_SID);
+      appendTitles(transcriptPath, { aiTitle: 'A title', customTitle: 'A custom name' });
+      const stdin = JSON.stringify({ session_id: NAMED_SID, cwd: ws, transcript_path: transcriptPath });
+
+      await runHook({ cwd: ws, stdin, env: { HOME: ws } });
+      const afterFirst = readEvents(ws).filter((e) => e.op === 'name_set').length;
+      assert.equal(afterFirst, 2);
+
+      await runHook({ cwd: ws, stdin, env: { HOME: ws } });
+      assert.equal(readEvents(ws).filter((e) => e.op === 'name_set').length, 2,
+        'unchanged names must not append');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('records the rename when the model changes its mind', async () => {
+    const ws = makeFakeWorkspace({ prefix: 'hook-names-rename-' });
+    try {
+      const transcriptPath = makeFakeTranscript(ws, NAMED_SID);
+      appendTitles(transcriptPath, { aiTitle: 'Fix HTTP 400 error' });
+      const stdin = JSON.stringify({ session_id: NAMED_SID, cwd: ws, transcript_path: transcriptPath });
+      await runHook({ cwd: ws, stdin, env: { HOME: ws } });
+
+      appendTitles(transcriptPath, { aiTitle: 'Analyze Knowledge Spine' });
+      await runHook({ cwd: ws, stdin, env: { HOME: ws } });
+
+      const values = readEvents(ws)
+        .filter((e) => e.op === 'name_set' && e.payload.channel === 'cc_ai_title')
+        .map((e) => e.payload.value);
+      assert.deepEqual(values, ['Fix HTTP 400 error', 'Analyze Knowledge Spine']);
+      // The projection keeps only the current one — history stays in the log.
+      const session = Object.values(readProjection(ws).sessions)[0];
+      assert.equal(session.names.filter((n) => n.channel === 'cc_ai_title').length, 1);
+      assert.equal(session.ai_title, 'Analyze Knowledge Spine');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('does not re-emit a title a pre-0.3.0 projection already recorded', async () => {
+    // The legacy field is the only record of the title on a projection written
+    // before names[] existed. Comparing against names[] alone would treat all
+    // 355 such sessions as newly named and append an event for each.
+    const ws = makeFakeWorkspace({ prefix: 'hook-names-legacy-' });
+    try {
+      const transcriptPath = makeFakeTranscript(ws, NAMED_SID);
+      appendTitles(transcriptPath, { aiTitle: 'Already known title' });
+      const stdin = JSON.stringify({ session_id: NAMED_SID, cwd: ws, transcript_path: transcriptPath });
+
+      // First run creates the record, then we strip names[] to simulate a
+      // projection cache written by an older build.
+      await runHook({ cwd: ws, stdin, env: { HOME: ws } });
+      const projPath = join(ws, 'tickets', '_logs', 'sessions-db.json');
+      const proj = JSON.parse(readFileSync(projPath, 'utf8'));
+      for (const s of Object.values(proj.sessions)) {
+        delete s.names;
+        delete s.display_name;
+        delete s.display_name_channel;
+      }
+      writeFileSync(projPath, JSON.stringify(proj));
+      const before = readEvents(ws).filter((e) => e.op === 'name_set').length;
+
+      await runHook({ cwd: ws, stdin, env: { HOME: ws } });
+      assert.equal(readEvents(ws).filter((e) => e.op === 'name_set').length, before,
+        'legacy ai_title must count as "already have this name"');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});

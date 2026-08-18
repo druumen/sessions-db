@@ -28,6 +28,65 @@ export function setAlias(opts: {
     error?: string;
 }>;
 /**
+ * Canonical payload for an alias write. Shared with `cli/alias.mjs --dry-run`
+ * so the preview and the write cannot diverge.
+ *
+ * @param {string|null} value
+ */
+export function aliasSetPayload(value: string | null): {
+    channel: string;
+    value: string;
+    source: string;
+};
+/**
+ * Set or clear a name on any channel.
+ *
+ * The general form behind `setAlias`, and the write path a consumer needs in
+ * order to push back a name it observed itself — cockpit reads Claude Code's
+ * `custom-title` off disk on every render, and until something writes it, the
+ * database never learns the one name a human actually typed.
+ *
+ * `channel` and `source` are open strings: this function validates that they
+ * are well-formed (length + identifier charset), never that they are already
+ * known. Refusing an unknown channel here would defeat the point of an open
+ * set — a new namer is supposed to be a non-event.
+ *
+ * `value: null` (or `clear: true`) records a deliberate clear. It is a
+ * history entry, not a deletion: "somebody removed this name" is itself
+ * information, and a delete would make it indistinguishable from
+ * "never named".
+ *
+ * @param {{
+ *   stableId: string,
+ *   channel: string,
+ *   value?: string|null,
+ *   clear?: boolean,
+ *   source?: string,
+ *   observedFrom?: string,
+ *   observedAt?: string,
+ *   rootPath?: string,
+ *   root?: string,
+ *   paths?: object,
+ * }} opts
+ * @returns {Promise<{ ok: boolean, event_id?: string, error?: string }>}
+ */
+export function setName(opts: {
+    stableId: string;
+    channel: string;
+    value?: string | null;
+    clear?: boolean;
+    source?: string;
+    observedFrom?: string;
+    observedAt?: string;
+    rootPath?: string;
+    root?: string;
+    paths?: object;
+}): Promise<{
+    ok: boolean;
+    event_id?: string;
+    error?: string;
+}>;
+/**
  * Link a session to one or more tasks / projects (additive, idempotent).
  *
  * At least one of `tasks` / `projects` must be a non-empty array. The

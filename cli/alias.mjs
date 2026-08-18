@@ -3,6 +3,11 @@
  * alias.
  * `sessions-db alias <stable_id> --clear` — remove the alias (sets to null).
  *
+ * 0.3.0: the alias is one channel of the session name model, so this writes
+ * a `name_set` event (channel `alias`, source `human`) rather than the old
+ * `alias_set`. Reads still understand `alias_set` — the log is append-only —
+ * and `session.alias` remains as a derived view of that channel.
+ *
  * Day 3 refactor: this handler is a thin wrapper around
  * `lib/operations.setAlias` — argparse + dry-run rendering + result-to-exit
  * mapping only. Existence-check is performed by the operation BEFORE the
@@ -10,7 +15,7 @@
  * of a synthesized empty session record.
  */
 
-import { setAlias } from '../lib/operations.mjs';
+import { aliasSetPayload, setAlias } from '../lib/operations.mjs';
 import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
 import { renderDryRun, reportResult, reportStableIdNotFound } from './_write-helpers.mjs';
 
@@ -83,8 +88,10 @@ export async function run(argv) {
   }
 
   if (dryRun) {
-    const payload = clear ? { alias: null } : { alias: aliasArg };
-    renderDryRun({ op: 'alias_set', stableId, payload, json });
+    // Same builder the write path uses, so the preview cannot describe an
+    // event the real write would not have produced.
+    const payload = aliasSetPayload(clear ? null : aliasArg);
+    renderDryRun({ op: 'name_set', stableId, payload, json });
     return;
   }
 
@@ -108,7 +115,7 @@ export async function run(argv) {
   }
 
   const code = reportResult({
-    result, op: 'alias_set', stableId, json, quiet,
+    result, op: 'name_set', stableId, json, quiet,
     extra: clear ? { cleared: true } : { alias: aliasArg },
   });
   if (code !== 0) process.exit(code);

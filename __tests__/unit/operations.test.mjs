@@ -31,9 +31,11 @@ import {
   linkTask,
   runSweep,
   setAlias,
+  setName,
   setParent,
   unlinkTask,
 } from '../../lib/operations.mjs';
+import { MAX_NAME_VALUE_LEN } from '../../lib/names.mjs';
 import { loadProjection } from '../../lib/storage.mjs';
 
 const SID_A = 'sess_aaaaaaaa-1111-7000-8000-000000000001';
@@ -510,6 +512,144 @@ describe('operations.runSweep', () => {
       });
       assert.equal(r.ok, false);
       assert.match(r.error, /must be >=/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('operations.setName', () => {
+  it('writes a name_set event on an arbitrary channel', async () => {
+    const root = mkTmp();
+    try {
+      plantProjection(root, [mkSession(SID_A)]);
+      const r = await setName({
+        stableId: SID_A,
+        channel: 'cc_custom_title',
+        value: 'typed by hand',
+        source: 'human',
+        observedFrom: '/t/a.jsonl',
+        root,
+      });
+      assert.equal(r.ok, true, r.error);
+      const [event] = eventsLines(root);
+      assert.equal(event.op, 'name_set');
+      assert.deepEqual(event.payload, {
+        channel: 'cc_custom_title',
+        value: 'typed by hand',
+        source: 'human',
+        observed_from: '/t/a.jsonl',
+      });
+      const proj = await loadProjection({ root });
+      assert.equal(proj.sessions[SID_A].display_name, 'typed by hand');
+      assert.equal(proj.sessions[SID_A].display_name_channel, 'cc_custom_title');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts a channel this build has never heard of', async () => {
+    // The write path validates SHAPE, never membership. Refusing an unknown
+    // channel here would defeat the point of an open set: adding a namer is
+    // supposed to be a non-event.
+    const root = mkTmp();
+    try {
+      plantProjection(root, [mkSession(SID_A)]);
+      const r = await setName({
+        stableId: SID_A, channel: 'dru_cli_label', value: 'from a future build',
+        source: 'plugin', root,
+      });
+      assert.equal(r.ok, true, r.error);
+      const proj = await loadProjection({ root });
+      const entry = proj.sessions[SID_A].names.find((n) => n.channel === 'dru_cli_label');
+      assert.equal(entry.value, 'from a future build');
+      assert.equal(entry.source, 'plugin');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('clear records a null-valued entry rather than deleting the channel', async () => {
+    const root = mkTmp();
+    try {
+      plantProjection(root, [mkSession(SID_A)]);
+      await setName({ stableId: SID_A, channel: 'cc_custom_title', value: 'temporary', root });
+      const r = await setName({ stableId: SID_A, channel: 'cc_custom_title', clear: true, root });
+      assert.equal(r.ok, true, r.error);
+      const proj = await loadProjection({ root });
+      const entry = proj.sessions[SID_A].names.find((n) => n.channel === 'cc_custom_title');
+      assert.ok(entry, 'the entry survives the clear');
+      assert.equal(entry.value, null);
+      assert.equal(entry.set_count, 2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects malformed input without throwing and without writing', async () => {
+    const root = mkTmp();
+    try {
+      plantProjection(root, [mkSession(SID_A)]);
+      const bad = [
+        { stableId: SID_A, channel: 'has space', value: 'x', root },
+        { stableId: SID_A, channel: 'a'.repeat(65), value: 'x', root },
+        { stableId: SID_A, channel: 'ok', value: 'x'.repeat(MAX_NAME_VALUE_LEN + 1), root },
+        { stableId: SID_A, channel: 'ok', value: 'x', source: 'two words', root },
+        { stableId: SID_A, channel: 'ok', root },
+        { stableId: SID_A, channel: 'ok', value: 'x', clear: true, root },
+        { channel: 'ok', value: 'x', root },
+      ];
+      for (const opts of bad) {
+        const r = await setName(opts);
+        assert.equal(r.ok, false, `should have rejected: ${JSON.stringify(opts)}`);
+        assert.match(r.error, /setName:/);
+      }
+      assert.equal(eventsLines(root).length, 0, 'no event written for any rejection');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an unknown stable_id before writing', async () => {
+    const root = mkTmp();
+    try {
+      plantProjection(root, [mkSession(SID_A)]);
+      const r = await setName({ stableId: 'sess_no-such', channel: 'alias', value: 'x', root });
+      assert.equal(r.ok, false);
+      assert.match(r.error, /stable_id not found/);
+      assert.equal(eventsLines(root).length, 0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('operations.setAlias — name model wiring', () => {
+  it('writes name_set on the alias channel and keeps session.alias as the mirror', async () => {
+    const root = mkTmp();
+    try {
+      plantProjection(root, [mkSession(SID_A)]);
+      const r = await setAlias({ stableId: SID_A, alias: 'pinned', root });
+      assert.equal(r.ok, true, r.error);
+      const [event] = eventsLines(root);
+      assert.equal(event.op, 'name_set');
+      assert.equal(event.payload.channel, 'alias');
+      assert.equal(event.payload.source, 'human');
+      const proj = await loadProjection({ root });
+      assert.equal(proj.sessions[SID_A].alias, 'pinned');
+      assert.equal(proj.sessions[SID_A].display_name_channel, 'alias');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an alias longer than a name may be', async () => {
+    const root = mkTmp();
+    try {
+      plantProjection(root, [mkSession(SID_A)]);
+      const r = await setAlias({ stableId: SID_A, alias: 'x'.repeat(MAX_NAME_VALUE_LEN + 1), root });
+      assert.equal(r.ok, false);
+      assert.equal(eventsLines(root).length, 0);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

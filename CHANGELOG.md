@@ -5,6 +5,136 @@ All notable changes to `@druumen/sessions-db` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-08-19
+
+Give a session all of its names, and give the names a history.
+
+Four parties name a Claude Code session and only two of them reached the
+database. The one carrying the strongest intent — `custom-title`, the name a
+person types by hand in Claude Code — had no field and no collector: cockpit
+read it off disk on every render and threw it away. And what *was* stored was
+stored flat, so every rename overwrote the previous name with no way to read it
+back. Measured on a 632-record reference database: 355 sessions carry a title,
+**51 of them were renamed at least once** by the model as the conversation
+drifted, and 406 rows recording those changes were sitting in `events.jsonl`
+with nothing able to read them.
+
+The failure that made it concrete: a session titled "Fix HTTP 400 error for
+oversized goal parameter" was later renamed to "Analyze Knowledge Spine". As of
+0.2.0, `search "Fix HTTP 400"` returned **nothing** — the current title was not
+indexed (only `alias` and the first prompt were), and the former one had no read
+path at all. The session existed, the data existed, and it was unfindable.
+
+### Added
+
+- **Name model (`lib/names.mjs`)** — one entry per **channel**, with
+  **authorship** kept as a separate axis:
+
+  | channel | who sets it | `source` | in the display chain |
+  |---|---|---|---|
+  | `alias` | `sessions-db alias` | `human` | yes — highest |
+  | `cc_custom_title` | Claude Code hand-rename | `human` | yes |
+  | `cc_ai_title` | Claude Code generated title | `llm` | yes |
+  | `agent_name` | agent-team badge | `harvest` | **no** |
+  | `first_prompt` | pseudo-channel for `first_prompt_preview` | — | yes — last |
+
+  `source` is not a synonym for channel: `cc_ai_title` and `cc_custom_title`
+  arrive through the same harvesting hook, but one was written by a model and
+  the other typed by a person — and "show me only the names a human gave this
+  session" is a question you cannot ask without that axis.
+
+  `agent_name` is recorded but deliberately kept out of the display chain:
+  measured, all 7 sessions carrying that record had it byte-identical to their
+  `ai_title`. It is a badge, not a name.
+
+- **`name_set` event op** — the general form. `alias_set` and `ai_title_seen`
+  are still reduced, forever: the log is append-only, and those 406 existing
+  rows (with their `observed_at` and `source_transcript`) are exactly where the
+  name history starts. New writes emit only `name_set`.
+
+- **`sessions-db names <id>` (`--json`)** — every name a session has had, per
+  channel, with `set_at` / `source` / provenance, and each entry marked current
+  or superseded. It **replays the event log** rather than reading the
+  projection, because the projection deliberately does not have the answer.
+
+- **`search --include-history`** — opt-in matching against names a session no
+  longer has. Same cost shape as `--content`: the default path stays
+  projection-only. Hits report the channel and whether the match was the
+  current value or a former one (`name:<channel>` vs `name_history:<channel>`,
+  plus a structured `name_hits` array in `--json`).
+
+- **`setName()` library operation** — set or clear any channel. This is the
+  write path a consumer needs to push back a name it observed itself; until
+  something writes `cc_custom_title`, the database never learns the one name a
+  human actually typed.
+
+- **`extractLatestTitles()`** — one tail scan returns the most recent
+  `ai-title`, `custom-title` and `agent-name` record. Measured on 353
+  transcripts: the last `custom-title` is inside the 256 KiB tail window in 6
+  of 6 files that have one, and `agent-name` in 7 of 7.
+
+### Changed
+
+- **`search` now indexes the current value of every naming channel.** The
+  biggest single gap it closes is `ai_title` — the name you actually see in
+  Claude Code, and previously the one thing metadata search did not cover (355
+  of 632 records). Works on projections that predate this release, via the
+  legacy fields.
+
+- **`SessionStart` now harvests all three naming records**, one `name_set` per
+  changed channel, with the same spam suppression as before (per channel).
+
+- **`sessions-db alias` writes `name_set`** (channel `alias`, source `human`)
+  instead of `alias_set`. Its stdout says `ok: name_set ...`; `session.alias` is
+  unchanged.
+
+- **`find`'s label column resolves through the shared chain.** It previously
+  re-implemented a three-level version of it, missing `cc_custom_title` — so
+  `find` and the cockpit panel could display different names for the same
+  session, and the difference was precisely the sessions a user had renamed by
+  hand. A hand-rename now renders with a `[custom]` tag.
+
+- **`session.alias` / `session.ai_title` are now derived views** of the `alias`
+  / `cc_ai_title` channels. They are still written and still correct; nothing
+  that reads them needs to change. Removing them is a later migration, once
+  every consumer reads `names[]`.
+
+### Projection
+
+Three optional fields per session — `names[]`, `display_name`,
+`display_name_channel`. `schema_version` stays **2**: this release adds fields
+and an op, and removes or repurposes nothing.
+
+Two properties are load-bearing rather than incidental:
+
+- **The projection stores current values only** — one entry per channel plus a
+  `set_count`. History is unbounded by design and lives in `events.jsonl`;
+  inlining it here would make the file that every cockpit refresh reads whole
+  grow with every rename, turning a storage decision into a performance defect.
+  Verified on the reference database: 51 renames, still one entry per channel.
+- **A reader must preserve channels it does not recognise.** The channel set is
+  open so that adding a namer is a non-event; the price is that filtering
+  unknown channels would silently delete a newer version's names on the next
+  save — no error, and nobody notices until a name they set is gone. Channel and
+  source are bounded (1-64 / 1-32 chars of `[A-Za-z0-9._-]`, starting
+  alphanumeric) so an open field cannot become an arbitrary payload lane, and a
+  value is capped at 512 characters (the longest real title measured is 62).
+
+`display_name_channel` is not decoration. `alias` outranks a Claude Code
+rename — a deliberate choice, since it is the only channel a machine never
+rewrites — so it is possible to rename a session in Claude Code and see no
+change. The channel is what lets a UI say "showing the alias" rather than look
+broken.
+
+### Compatibility
+
+- Rebuilding the full reference log (2017 events, 632 sessions) with this
+  reducer produces records **identical field for field** to the previous one,
+  with only the three new fields added.
+- A pre-0.3.0 reducer treats `name_set` as an unknown op: not destructive, but
+  its projection will not reflect names a newer version wrote. Pin one version
+  per machine — see "Version skew" in the README.
+
 ## [0.2.0] — 2026-08-17
 
 Stop the database from filling with sessions nobody ever used, and start

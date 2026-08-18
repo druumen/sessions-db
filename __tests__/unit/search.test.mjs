@@ -4,9 +4,12 @@ import assert from 'node:assert/strict';
 import {
   sessionMetadataFields,
   matchSessionMetadata,
+  matchCurrentNames,
+  matchNameHistory,
   recordText,
   extractSnippet,
 } from '../../lib/search.mjs';
+import { foldNameHistory } from '../../lib/names.mjs';
 
 describe('search — sessionMetadataFields', () => {
   it('collects non-empty labelled fields, skips empties', () => {
@@ -108,5 +111,82 @@ describe('search — extractSnippet', () => {
     assert.equal(extractSnippet('no match here', 'needle'), null);
     assert.equal(extractSnippet('', 'needle'), null);
     assert.equal(extractSnippet('text', ''), null);
+  });
+});
+
+describe('search — names on the metadata tier', () => {
+  it('indexes the current value of every channel, labelled by channel', () => {
+    const fields = sessionMetadataFields({
+      stable_id: 'sess_x',
+      names: [
+        { channel: 'cc_ai_title', value: 'Fix HTTP 400 error', set_at: 't', source: 'llm' },
+        { channel: 'cc_custom_title', value: 'typed by hand', set_at: 't', source: 'human' },
+        { channel: 'agent_name', value: 'a-badge', set_at: 't', source: 'harvest' },
+      ],
+    });
+    const byLabel = Object.fromEntries(fields);
+    assert.equal(byLabel['name:cc_ai_title'], 'Fix HTTP 400 error');
+    assert.equal(byLabel['name:cc_custom_title'], 'typed by hand');
+    // agent_name is not in the DISPLAY chain, but it is still searchable — you
+    // should be able to find a session by the agent that ran it.
+    assert.equal(byLabel['name:agent_name'], 'a-badge');
+  });
+
+  it('closes the ai_title hole on projections that predate names[]', () => {
+    // 355 of 626 records on the reference database carry an ai_title and no
+    // names[] — the title the user actually sees, previously unsearchable.
+    const hits = matchSessionMetadata({ stable_id: 'sess_x', ai_title: 'Fix HTTP 400 error' }, 'http 400');
+    assert.deepEqual(hits, ['name:cc_ai_title']);
+  });
+
+  it('does not duplicate the alias under a second label', () => {
+    // `alias` keeps its historical label so existing matched_in consumers do
+    // not have to learn a new one.
+    const hits = matchSessionMetadata({
+      stable_id: 'sess_x',
+      alias: 'pricing-overhaul',
+      names: [{ channel: 'alias', value: 'pricing-overhaul', set_at: 't', source: 'human' }],
+    }, 'pricing');
+    assert.deepEqual(hits, ['alias']);
+  });
+
+  it('matchCurrentNames returns the matched value, not just a label', () => {
+    const session = {
+      stable_id: 'sess_x',
+      first_prompt_preview: 'a query about pricing',
+      names: [{ channel: 'cc_ai_title', value: 'Pricing model rewrite', set_at: 'T1', source: 'llm' }],
+    };
+    assert.deepEqual(matchCurrentNames(session, 'pricing'), [{
+      channel: 'cc_ai_title', value: 'Pricing model rewrite',
+      set_at: 'T1', source: 'llm', kind: 'current',
+    }]);
+    // first_prompt is the display fallback, not a name anybody gave it, and it
+    // is already reported under its own label.
+    assert.equal(matchCurrentNames(session, 'a query').length, 0);
+  });
+});
+
+describe('search — matchNameHistory', () => {
+  const events = [
+    { ts: 'T1', event_id: 'e1', op: 'ai_title_seen', stable_id: 'sess_x', payload: { ai_title: 'Fix HTTP 400 error' } },
+    { ts: 'T2', event_id: 'e2', op: 'name_set', stable_id: 'sess_x', payload: { channel: 'cc_ai_title', value: 'Analyze Knowledge Spine', source: 'llm' } },
+  ];
+
+  it('matches a superseded value and marks it historical', () => {
+    const byChannel = foldNameHistory(events).get('sess_x');
+    assert.deepEqual(matchNameHistory(byChannel, 'http 400'), [{
+      channel: 'cc_ai_title', value: 'Fix HTTP 400 error',
+      set_at: 'T1', source: 'llm', kind: 'history',
+    }]);
+  });
+
+  it('excludes the current value — that tier is the metadata pass', () => {
+    const byChannel = foldNameHistory(events).get('sess_x');
+    assert.deepEqual(matchNameHistory(byChannel, 'knowledge spine'), []);
+  });
+
+  it('is a no-op on empty input', () => {
+    assert.deepEqual(matchNameHistory(null, 'x'), []);
+    assert.deepEqual(matchNameHistory(new Map(), ''), []);
   });
 });

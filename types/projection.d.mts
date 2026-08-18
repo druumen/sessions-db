@@ -20,6 +20,9 @@ export function emptySession(stableId: string, ts: string): {
     stable_id: string;
     alias: any;
     ai_title: any;
+    names: any[];
+    display_name: any;
+    display_name_channel: any;
     claude_session_ids: any[];
     transcript_files: any[];
     fingerprints: {
