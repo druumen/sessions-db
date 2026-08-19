@@ -64,6 +64,15 @@ export function sanitizeFirstPrompt(raw: string, opts?: {
  * only then are runs of spaces collapsed — so a space introduced by an
  * earlier step cannot survive as a double space into the result.
  *
+ * ⚠ The last two steps are the ones that look reorderable and are not. Move
+ * the collapse ahead of the invisible removal and `a<space><ZWSP><space>b`
+ * comes out with a double space, which the next pass then eats — so the
+ * function stops being idempotent for every value whose invisibles happen to
+ * sit between spaces. It is pinned by an enumerating property test rather
+ * than a fixture list (`__tests__/unit/sanitize.test.mjs`), because the whole
+ * problem with that swap is that it survives every shape somebody thinks to
+ * write down: the failing input needs five parts before it shows.
+ *
  * @param {string} raw
  * @returns {string} sanitised value (may be empty — callers treat empty as
  *   "no usable name" rather than storing it)

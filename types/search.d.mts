@@ -1,5 +1,15 @@
 /**
  * Labelled metadata strings a session exposes to search. Skips empty values.
+ *
+ * The two name-bearing fields go through `sanitizeNameValue` first. These are
+ * the raw legacy mirrors — `alias` as `alias_set` wrote it, `first_prompt_preview`
+ * as the user typed it — and everything else that reads them for display
+ * (`nameValuesFromSession`, and through it `find`'s label and this module's
+ * `matchCurrentNames`) cleans them. Searching the raw bytes while showing the
+ * cleaned ones produces a hit the caller cannot account for: the query matched
+ * an escape sequence that appears nowhere in the row they are looking at. The
+ * text searched has to be the text shown.
+ *
  * @returns {Array<[string, string]>} [label, value] pairs
  */
 export function sessionMetadataFields(session: any): Array<[string, string]>;

@@ -1587,6 +1587,47 @@ describe('sessions-db-session-start.mjs — name harvesting', () => {
     }
   });
 
+  it('records a re-attribution — same string, different author', async () => {
+    // The two ends of the model have to agree on what a change is. The reducer
+    // (`isSameNaming`) compares `(value, source)`, so a `custom-title` that
+    // moves between `harvest` and `human` is a real change to it; the hook
+    // compared the value alone and swallowed exactly those, leaving the stale
+    // author label on the record with nothing able to correct it afterwards.
+    const ws = makeFakeWorkspace({ prefix: 'hook-names-reattrib-' });
+    try {
+      const transcriptPath = makeFakeTranscript(ws, NAMED_SID);
+      appendTitles(transcriptPath, { customTitle: 'hand typed name' });
+      const stdin = JSON.stringify({ session_id: NAMED_SID, cwd: ws, transcript_path: transcriptPath });
+
+      await runHook({ cwd: ws, stdin, env: { HOME: ws } });
+
+      // Rewrite the stored authorship to what a different classification would
+      // have produced. The value is untouched — that is the whole point.
+      const projPath = join(ws, 'tickets', '_logs', 'sessions-db.json');
+      const proj = JSON.parse(readFileSync(projPath, 'utf8'));
+      for (const sess of Object.values(proj.sessions)) {
+        for (const n of sess.names ?? []) {
+          if (n.channel === 'cc_custom_title') n.source = 'harvest';
+        }
+      }
+      writeFileSync(projPath, JSON.stringify(proj));
+
+      await runHook({ cwd: ws, stdin, env: { HOME: ws } });
+
+      const custom = readEvents(ws)
+        .filter((e) => e.op === 'name_set' && e.payload.channel === 'cc_custom_title');
+      assert.equal(custom.length, 2, 'the re-attribution is written');
+      assert.deepEqual(custom.map((e) => e.payload.source), ['human', 'human']);
+      assert.deepEqual(new Set(custom.map((e) => e.payload.value)), new Set(['hand typed name']));
+
+      const session = Object.values(readProjection(ws).sessions)[0];
+      const entry = session.names.find((n) => n.channel === 'cc_custom_title');
+      assert.equal(entry.source, 'human', 'and the record no longer carries the stale author');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
   it('does not re-emit a title a pre-0.3.0 projection already recorded', async () => {
     // The legacy field is the only record of the title on a projection written
     // before names[] existed. Comparing against names[] alone would treat all

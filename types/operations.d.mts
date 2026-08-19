@@ -28,6 +28,35 @@ export function setAlias(opts: {
     error?: string;
 }>;
 /**
+ * Validate and clean one alias value — the single rule both the write path
+ * and `cli/alias.mjs --dry-run` answer to.
+ *
+ * Extracted because the dry run had been reimplementing half of it: it
+ * sanitised (so the preview showed the right bytes) but did not re-check the
+ * result, so an alias that is nothing but escape sequences previewed as
+ * `{"alias":""}` — an event the real write refuses outright. A dry run that
+ * describes a write that cannot happen is worse than no dry run, and the only
+ * durable fix is for there to be one rule rather than two that agree today.
+ *
+ * Sanitising before the length check is deliberate: the cap has to apply to
+ * what is actually stored, and an all-escape value has to fail with a reason
+ * rather than be written as an empty name.
+ *
+ * Errors are worded as user-facing sentences with no caller prefix, so
+ * `setAlias` can prefix them for the library surface while the CLI prints
+ * them as-is.
+ *
+ * @param {unknown} alias
+ * @returns {{ ok: true, value: string } | { ok: false, error: string }}
+ */
+export function normalizeAliasValue(alias: unknown): {
+    ok: true;
+    value: string;
+} | {
+    ok: false;
+    error: string;
+};
+/**
  * Canonical payload for an alias write. Shared with `cli/alias.mjs --dry-run`
  * so the preview and the write cannot diverge.
  *

@@ -391,5 +391,96 @@ describe('projection.mjs — name model', () => {
         rmSync(root, { recursive: true, force: true });
       }
     });
+
+    it('keeps a channel the log no longer mentions', async () => {
+      // The rotated-log shape, which is a real operation on this database (two
+      // `.legacy` shards exist). The cache holds two channels; the surviving
+      // log only ever mentions one. A session-level replace answers "the log
+      // says alias='from-log' and nothing else", deleting a name nobody asked
+      // to remove and that no later event can restore.
+      const root = mkTmp();
+      try {
+        const opts = { rootPath: root };
+        await appendEvent(evt('alias_set', TS_C, { alias: 'from-log' }, 'log'), opts);
+
+        writeFileSync(join(root, 'sessions-db.json'), JSON.stringify({
+          _meta: {
+            schema_version: 2, fingerprint_versions: [], updated: TS_C,
+            event_count: 1, last_event_id: 'evt_test-log',
+          },
+          sessions: {
+            [SID]: {
+              stable_id: SID,
+              // The mirror is stale relative to names[] on purpose: this is
+              // what a cache written by a build with a different name model
+              // looks like after the log behind it was rotated.
+              alias: 'stale-cache',
+              created_at: TS_A,
+              names: [
+                { channel: CHANNEL_ALIAS, value: 'stale-cache', set_at: TS_A, source: SOURCE_HUMAN, set_count: 7 },
+                { channel: 'custom_tool', value: 'only-in-cache', set_at: TS_B, source: SOURCE_HARVEST, set_count: 1 },
+              ],
+            },
+          },
+        }));
+
+        const loaded = await loadProjection(opts);
+        const s = loaded.sessions[SID];
+
+        const kept = findNameEntry(s, 'custom_tool');
+        assert.ok(kept, 'a channel the log cannot speak for survives the repair');
+        assert.equal(kept.value, 'only-in-cache');
+        assert.equal(kept.set_count, 1, 'and survives unedited');
+
+        // The channel the log DOES speak for takes the log's answer — that is
+        // the entire point of the repair.
+        assert.equal(findNameEntry(s, CHANNEL_ALIAS).value, 'from-log');
+        assert.equal(findNameEntry(s, CHANNEL_ALIAS).set_count, 1);
+
+        // ...and the legacy mirror moves with it. Leaving it behind gave the
+        // record two answers: `display_name` said 'from-log' while `search`'s
+        // alias label and `prune`'s check still read 'stale-cache'.
+        assert.equal(s.alias, 'from-log', 'the mirror follows names[]');
+        assert.equal(s.display_name, 'from-log');
+        assert.equal(s.display_name_channel, CHANNEL_ALIAS);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it('a channel cleared in the log clears the mirror too', async () => {
+      // The other direction of the same divergence: the log's last word on
+      // `alias` is a clear, so a mirror left at its old value would resurrect
+      // a name the log says was removed.
+      const root = mkTmp();
+      try {
+        const opts = { rootPath: root };
+        await appendEvent(evt('alias_set', TS_C, { alias: null }, 'clear'), opts);
+
+        writeFileSync(join(root, 'sessions-db.json'), JSON.stringify({
+          _meta: {
+            schema_version: 2, fingerprint_versions: [], updated: TS_C,
+            event_count: 1, last_event_id: 'evt_test-clear',
+          },
+          sessions: {
+            [SID]: {
+              stable_id: SID, alias: 'ghost', created_at: TS_A,
+              first_prompt_preview: 'what the session was about',
+              names: [
+                { channel: CHANNEL_ALIAS, value: 'ghost', set_at: TS_A, source: SOURCE_HUMAN, set_count: 1 },
+              ],
+            },
+          },
+        }));
+
+        const s = (await loadProjection(opts)).sessions[SID];
+        assert.equal(s.alias, null);
+        assert.equal(findNameEntry(s, CHANNEL_ALIAS).value, null, 'a clear is a record, not a delete');
+        assert.equal(s.display_name, 'what the session was about');
+        assert.equal(s.display_name_channel, CHANNEL_FIRST_PROMPT);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
   });
 });

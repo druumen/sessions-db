@@ -329,7 +329,9 @@ Three properties are worth knowing before you build on this:
   and bidi overrides are stripped or folded to spaces on the way in and on
   the way out. Names are printed to a terminal unescaped by `names`,
   `find` and `search`, and `custom-title` is a free-text field somebody
-  types into.
+  types into. "On the way out" includes the legacy top-level `alias` /
+  `ai_title` mirrors, which pre-date the sanitiser and are the values a
+  record written by an older build still displays from.
 - **`display_name_channel` explains `display_name`.** `alias` outranks a
   Claude Code rename, so it is possible to rename a session in Claude
   Code and see no change. Surface the channel and the UI can say

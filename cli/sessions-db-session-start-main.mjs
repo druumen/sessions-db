@@ -60,6 +60,7 @@ import {
   SOURCE_HUMAN,
   SOURCE_LLM,
   currentNameValue,
+  findNameEntry,
   isValidNameValue,
   nameSetPayload,
 } from '../lib/names.mjs';
@@ -462,7 +463,24 @@ async function harvestNames({ stableId, transcriptPath, recordTargetOpts }) {
 
   const observedAt = new Date().toISOString();
   for (const { channel, value, source } of candidates) {
-    if (session && currentNameValue(session, channel) === value) continue;
+    // Suppression has to agree with what the REDUCER calls a change, or the
+    // two ends of the model disagree about the same event. `isSameNaming`
+    // compares `(value, source)`: the same string attested by a person is a
+    // different fact from one a harvester scraped, which is the entire reason
+    // the `source` axis exists. A value-only check here therefore swallowed
+    // re-attributions — `custom-title` moving between `harvest` and `human`
+    // when `isMachineGeneratedCustomTitle` reclassifies it — and the stale
+    // author label then stayed on the record permanently, because the write
+    // that would have corrected it was never made.
+    //
+    // The author is only compared when the record HAS one. A pre-0.3.0 record
+    // carries the legacy mirror and no entry, so it has no opinion about
+    // authorship; demanding a match there would make every one of those
+    // sessions look re-attributed and re-emit for all of them, which is the
+    // regression `currentNameValue`'s fallback exists to prevent.
+    const stored = session ? findNameEntry(session, channel) : null;
+    const sameValue = !!session && currentNameValue(session, channel) === value;
+    if (sameValue && (!stored || stored.source === source)) continue;
 
     const event = newEvent({
       op: 'name_set',

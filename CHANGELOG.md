@@ -226,13 +226,100 @@ Found by an independent review of this release before it shipped.
   newest-first list — the normal case, since one harvest pass writes every
   changed channel with a single `observedAt`.
 
+Found by a second independent review of the same release.
+
+- **The read-path sanitiser had a bypass, and it was the worst-case value that
+  took it.** A legacy `alias` / `ai_title` mirror is cleaned by nothing when
+  the projection is read, and the cleaning that happens on the way out of the
+  *event log* silently excludes exactly one class: a value that is nothing but
+  escape bytes cleans to empty, fails validation, and so never becomes a
+  `names[]` entry at all — at which point the channel reads as unset and the
+  display chain falls back to the raw mirror. `find` and `search` then printed
+  the original bytes to the terminal, and `names` said "No names have ever been
+  set" about the session it had just labelled `[via alias]`. Partial junk was
+  never affected (the cleaned entry exists and wins). The fallback is now
+  cleaned wherever it is read — display map, per-channel lookup, and the
+  metadata `search` indexes — with empty treated as "no name", so the chain
+  falls through instead of stopping on a label that renders as nothing.
+
+  The per-channel lookup mattered for a second reason: it is what the
+  harvester compares against to decide whether a name changed, and the value it
+  compares it to is already cleaned. A raw mirror could never match one, so the
+  duplicate suppression that fallback exists to provide would have inverted
+  into an event per SessionStart, forever.
+
+- **The name-model cache repair replaced a session's names wholesale.** It
+  overlaid rather than rebuilt — because a log can be rotated or retired — and
+  then discarded that same reasoning one level down: a session the surviving
+  log mentions through *one* channel had every *other* channel deleted, with no
+  event able to restore them, and the legacy `alias` / `ai_title` mirrors left
+  behind pointing at the old value. One record, two answers, depending on
+  whether the consumer read `display_name` or the mirror. The merge is now per
+  channel — the log wins where it speaks, the cache is kept where it does not —
+  and the mirrors are re-derived from the merged block. The remaining residual
+  is a `set_count` reflecting what a truncated log still holds, never a lost
+  name. No effect on the 0.3.0 upgrade itself: measured on the 635-session
+  reference database, the log covers every session, 0 channels were at risk.
+
+- **`_meta.event_count` was the same defect the `set_count` fix above was
+  about**, in the one field whose documented purpose is letting callers detect
+  drift — and it drifted. `tryUpdateProjection` appends to the log and then
+  folds, so on a cold cache the fold is a rebuild from a log that already
+  contains the event, which was then applied and counted a second time: a
+  3-event log reported 4, and every later cold write added another permanent
+  +1 that only `rebuild` could clear. The counter now deduplicates on event
+  IDENTITY (a fold of the id already in `last_event_id` is a replay, not a new
+  event) rather than on effect — a repeat that changes nothing is still a line
+  in the log, and skipping it would break the count in the other direction.
+
+- **The sanitiser's ordering invariant had no test, and the natural mutation
+  escaped all 718 of them.** Moving the space-collapse ahead of the
+  invisible-removal step passed the entire suite while breaking idempotency on
+  ~9% of a 300k-input fuzz (`a<space><ZWSP><space>b` comes out double-spaced),
+  which would have made every re-observation of such a name look like a rename.
+  The fixture list could not have caught it: the failing shape needs five parts
+  before it shows, and every fixture was shorter. Replaced by an enumerating
+  property test over one atom per hazard class, which kills that mutation.
+
+- **`alias` echoed the bytes it was handed, not the name it stored** — so a
+  successful write printed the escape sequence to the terminal the sanitiser
+  exists to protect, and reported a name (`clean<ESC>[31mRED`) the session is
+  not actually called (`cleanRED`). It now echoes the stored value.
+
+- **`alias --dry-run` previewed a write that cannot happen.** An alias made
+  entirely of escape sequences rendered `{"alias":""}` and exited 0, while the
+  real write refuses it outright. Both now answer to one validator.
+
+- **The harvester and the reducer disagreed about what a change is.** The
+  reducer counts `(value, source)` — the same string attested by a person is a
+  different fact from one a harvester scraped, which is the whole reason the
+  axis exists — while the hook's duplicate suppression compared the value
+  alone. A `custom-title` moving between `harvest` and `human` was therefore
+  swallowed, and the stale author label stayed on the record permanently. The
+  author is now compared too, except on records that have no `names[]` entry
+  and therefore no opinion about authorship (a pre-0.3.0 cache, which must not
+  look re-attributed).
+
+- **The two-barrel type manifest check read only the first `export type` block**
+  (`match`, not `matchAll`), so the day a barrel re-exports from a second module
+  the new names stop being compared — silently, for exactly the additions most
+  likely to drift. It now reads every block, in either formatting.
+
+### Known boundaries
+
+- `isSameNaming` compares by code units, not by Unicode equivalence: NFC `é`
+  and NFD `é` are visually identical and count as a rename. Left alone
+  deliberately — folding at the comparison would disagree with the value
+  actually stored, and folding on the write path re-keys an append-only log.
+  Documented in `lib/names.mjs`.
+
 ### Compatibility
 
 - Rebuilding the full reference log (2018 events, 632 sessions) with this
   reducer produces records **identical field for field** to the previous one,
   with only the three new fields added.
 - Applying every one of those 2018 events **twice** changes nothing: 0 of 632
-  sessions differ. Folding the whole log concatenated with itself moves
+  sessions differ, and `_meta` no longer differs either. Folding the whole log concatenated with itself moves
   `set_count` on the 51 sessions that were genuinely renamed and on nothing
   else — `A → B` doubled is the sequence `A, B, A, B`, which really is four
   namings.

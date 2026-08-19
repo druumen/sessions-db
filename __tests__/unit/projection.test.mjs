@@ -557,18 +557,23 @@ describe('projection.mjs', () => {
 
   describe('rebuildFromEvents', () => {
     it('folds a sequence into a deterministic projection', () => {
+      // Distinct id per event, including the two same-millisecond pairs.
+      // `newEvent` mints a fresh UUIDv7 for every event, so two rows sharing
+      // an `event_id` is not a shape the log can hold — and `event_count`
+      // counts distinct events, so a fixture that reuses one is asserting
+      // against a log that cannot exist.
       const events = [
         evt('session_seen', TS_A, {
           claude_session_id: 'cs-1',
           transcript_file: { path: '/t/a.jsonl', size: 100 },
           first_prompt_preview: 'hello',
           fingerprints: { first_human_prompt_v1: 'fp1' },
-        }),
-        evt('alias_set', TS_A, { alias: 'first' }),
-        evt('session_link', TS_B, { tasks: ['t1'], projects: ['p1'] }),
-        evt('session_seen', TS_B, { claude_session_id: 'cs-2' }),
-        evt('parent_set', TS_C, { parent_session_id: SID_2 }),
-        evt('close', TS_D, { outcome: 'done', closed_reason: 'shipped' }),
+        }, '1'),
+        evt('alias_set', TS_A, { alias: 'first' }, '2'),
+        evt('session_link', TS_B, { tasks: ['t1'], projects: ['p1'] }, '3'),
+        evt('session_seen', TS_B, { claude_session_id: 'cs-2' }, '4'),
+        evt('parent_set', TS_C, { parent_session_id: SID_2 }, '5'),
+        evt('close', TS_D, { outcome: 'done', closed_reason: 'shipped' }, '6'),
       ];
       const p = rebuildFromEvents(events);
       assert.equal(p._meta.event_count, events.length);
@@ -646,6 +651,45 @@ describe('projection.mjs', () => {
       applyEvent(p, e1);
       applyEvent(p, e2);
       assert.equal(p._meta.last_event_id, e2.event_id);
+    });
+
+    it('re-folding the last event does not move event_count', () => {
+      // The module header promises that applying the same event twice leaves
+      // the projection unchanged. `_meta` is part of the projection, and an
+      // unconditional `+= 1` broke that promise for the one field whose job is
+      // to tell callers whether the projection has drifted from the log.
+      const p = emptyProjection();
+      const e1 = evt('session_seen', TS_A, { claude_session_id: 'cs-1' }, '1');
+      applyEvent(p, e1);
+      applyEvent(p, e1);
+      applyEvent(p, e1);
+      assert.equal(p._meta.event_count, 1, 'one event in the log, one counted');
+      assert.equal(p._meta.last_event_id, e1.event_id);
+    });
+
+    it('two different events both count — the dedup is on identity, not effect', () => {
+      // The boundary in the other direction. A second event that happens to
+      // change nothing (same alias set twice) is still a line in the log, and
+      // a counter that skipped it would report drift on a healthy projection.
+      const p = emptyProjection();
+      applyEvent(p, evt('alias_set', TS_A, { alias: 'same' }, '1'));
+      applyEvent(p, evt('alias_set', TS_B, { alias: 'same' }, '2'));
+      assert.equal(p._meta.event_count, 2);
+      assert.equal(p.sessions[SID].names[0].set_count, 1, 'and the naming was still a no-op');
+    });
+
+    it('counts events that carry no event_id instead of collapsing them', () => {
+      // `event_id` is optional in the reducer's tolerated input. Two events
+      // without one are not "the same event" — they are two events nothing can
+      // tell apart, so the safe reading is to count both. A naive
+      // `event.event_id === _meta.last_event_id` test reads `undefined ===
+      // null` as false on the first and would then compare `null === null` on
+      // every one after it.
+      const p = emptyProjection();
+      applyEvent(p, { ts: TS_A, op: 'alias_set', stable_id: SID, payload: { alias: 'x' } });
+      applyEvent(p, { ts: TS_B, op: 'alias_set', stable_id: SID, payload: { alias: 'y' } });
+      assert.equal(p._meta.event_count, 2);
+      assert.equal(p._meta.last_event_id, null);
     });
   });
 

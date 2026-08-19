@@ -49,17 +49,34 @@ const TYPES_ESM = resolve(PACKAGE_ROOT, 'types', 'index.d.ts');
 const TYPES_CJS = resolve(PACKAGE_ROOT, 'types', 'index.d.cts');
 
 /**
- * The identifiers in a barrel's `export type { ... } from ...` block.
+ * The identifiers in a barrel's `export type { ... } from ...` blocks.
  * Comment lines and the module specifier are ignored; what is compared is the
  * set of names a consumer can import.
+ *
+ * EVERY such block, not the first one. Both barrels happen to have exactly one
+ * today, and a single `match` was enough for that — but it is enough only for
+ * that: the day a barrel re-exports types from a second module, the names in
+ * the new block stop being compared, silently, and this gate goes back to
+ * being decorative for exactly the additions most likely to drift. Which block
+ * a name lives in is not something a consumer can observe, so the comparison
+ * is over the union.
  */
 function exportedTypeNames(path) {
-  const src = readFileSync(path, 'utf8');
-  const block = src.match(/export type \{([\s\S]*?)\} from/);
-  if (!block) throw new Error(`no \`export type { ... } from\` block in ${path}`);
-  return block[1]
-    .split('\n')
-    .map((line) => line.replace(/\/\/.*$/, '').trim().replace(/,$/, ''))
+  return parseExportedTypeNames(readFileSync(path, 'utf8'), path);
+}
+
+/** The parsing half, separated so the union behaviour above is testable. */
+function parseExportedTypeNames(src, path = '<source>') {
+  const blocks = [...src.matchAll(/export type \{([\s\S]*?)\} from/g)];
+  if (blocks.length === 0) throw new Error(`no \`export type { ... } from\` block in ${path}`);
+  return blocks
+    .flatMap((block) => block[1].split('\n'))
+    // Comments go before the comma split, not after: a comment containing a
+    // comma ("// a, b") would otherwise be cut in half and its tail would
+    // survive the strip as a plausible-looking identifier.
+    .map((line) => line.replace(/\/\/.*$/, ''))
+    .flatMap((line) => line.split(','))
+    .map((name) => name.trim())
     .filter((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
     .sort();
 }
@@ -141,6 +158,24 @@ test('types-smoke', async (t) => {
         `--- stdout ---\n${result.stdout}\n` +
         `--- stderr ---\n${result.stderr}\n`,
     );
+  });
+
+  await t.test('the manifest reader sees every export block, not just the first', () => {
+    // The gate below is only as good as this: with a single `match` it read
+    // block one and stopped, so a name added in a second block was never
+    // compared and the divergence it exists to catch walked straight through.
+    const twoBlocks = [
+      // Both real barrels use the one-name-per-line form; the single-line form
+      // is here because nothing stops the next block from being written that
+      // way, and a reader that only understands one layout is the same defect
+      // one level down.
+      "export type { Alpha, Beta } from './a.d.mts';",
+      'export type {',
+      '  Gamma, // a comment with a comma, like this one',
+      '  Delta,',
+      "} from './b.d.mts';",
+    ].join('\n');
+    assert.deepEqual(parseExportedTypeNames(twoBlocks), ['Alpha', 'Beta', 'Delta', 'Gamma']);
   });
 
   await t.test('the two barrels export the same type names', () => {

@@ -650,6 +650,50 @@ describe('storage.mjs', () => {
         rmSync(dir, { recursive: true, force: true });
       }
     });
+
+    it('a write onto a cold cache counts the event once, not twice', async () => {
+      // `tryUpdateProjection` appends to the log and THEN folds. With no cache
+      // on disk the fold is a rebuild from a log that already contains the
+      // event being applied, so the event was counted by the rebuild and then
+      // again by the apply. Every cold write added a permanent +1 that only
+      // `rebuild` could clear — in a field whose stated purpose is letting
+      // callers detect drift against the log.
+      const dir = mkTmp();
+      try {
+        const paths = pathsFor(dir);
+        for (let i = 0; i < 3; i++) {
+          const res = await tryUpdateProjection(
+            newEvent({ op: 'session_link', stable_id: SID_A, payload: { tasks: [`t${i}`] } }),
+            { paths },
+          );
+          assert.equal(res.ok, true, `write ${i} failed: ${res.error}`);
+        }
+
+        const countLines = () =>
+          readFileSync(paths.eventsJsonl, 'utf8').split('\n').filter(Boolean).length;
+        assert.equal(countLines(), 3);
+        assert.equal((await loadProjection({ paths }))._meta.event_count, 3);
+
+        // Now force the cold path again: delete the cache and write once more.
+        // This is the shape the hook hits after any cache loss.
+        unlinkSync(paths.projectionJson);
+        const res = await tryUpdateProjection(
+          newEvent({ op: 'session_link', stable_id: SID_A, payload: { tasks: ['t-cold'] } }),
+          { paths },
+        );
+        assert.equal(res.ok, true, res.error);
+        assert.equal(countLines(), 4);
+        const afterCold = await loadProjection({ paths });
+        assert.equal(afterCold._meta.event_count, 4, 'cold write must not double-count');
+
+        // ...and the counter a `rebuild` produces has to be the same number,
+        // since that is what "detect drift" compares against.
+        await rebuildProjection({ paths });
+        assert.equal((await loadProjection({ paths }))._meta.event_count, 4);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('recordSessionSeen — P3 identity (3-priority resolution)', () => {

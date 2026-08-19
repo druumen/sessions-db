@@ -33,6 +33,35 @@ describe('search — sessionMetadataFields', () => {
     assert.ok(labels.includes('claude_session_id'));
     assert.ok(!labels.includes('first_prompt')); // empty skipped
   });
+
+  it('searches the cleaned text, not the raw bytes behind it', () => {
+    // `alias` and `first_prompt_preview` are the two raw legacy mirrors on the
+    // record. Everything that DISPLAYS them cleans them first, so indexing the
+    // raw form produces a hit the caller cannot account for: `search "31m"`
+    // returns a row in which "31m" appears nowhere. The value handed to the
+    // matcher has to be the value the user will be shown.
+    const fields = sessionMetadataFields({
+      stable_id: 'sess_x',
+      alias: '\x1b[31mred-alias\x1b[0m',
+      first_prompt_preview: 'why is\x1b[2K this failing',
+    });
+    const byLabel = Object.fromEntries(fields);
+    assert.equal(byLabel.alias, 'red-alias');
+    assert.equal(byLabel.first_prompt, 'why is this failing');
+    assert.deepEqual(
+      matchSessionMetadata({ stable_id: 'sess_x', alias: '\x1b[31mred\x1b[0m' }, '31m'),
+      [],
+      'the escape sequence is not searchable text',
+    );
+  });
+
+  it('drops a mirror that is nothing but escape bytes', () => {
+    // Cleaning to empty means there is no name here at all — the field must
+    // disappear from the index rather than match the empty query or show up
+    // as a blank labelled hit.
+    const fields = sessionMetadataFields({ stable_id: 'sess_x', alias: '\x1b[31m\x1b[0m' });
+    assert.deepEqual(fields.map(([l]) => l), ['stable_id']);
+  });
 });
 
 describe('search — matchSessionMetadata', () => {

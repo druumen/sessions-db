@@ -33,6 +33,7 @@ import {
   sortChannels,
   splitChannelHistory,
 } from '../../lib/names.mjs';
+import { sanitizeNameValue } from '../../lib/sanitize.mjs';
 
 const TS_A = '2026-08-01T10:00:00.000Z';
 const TS_B = '2026-08-02T10:00:00.000Z';
@@ -202,6 +203,47 @@ describe('names.mjs — reading values off a session record', () => {
       [CHANNEL_FIRST_PROMPT]: 'p',
     });
     assert.equal(displayNameForSession(legacy).display_name, 'legacy-alias');
+  });
+
+  it('cleans the legacy mirror before it reaches the display map', () => {
+    // The bypass this closes: `nameChangeFromEvent` sanitises, so a value that
+    // is entirely escape bytes cleans to empty, fails validation, and never
+    // becomes a names[] entry. The channel then reads as unset, the fallback
+    // below picks the RAW mirror up, and `find` / `search` print the escape
+    // sequence to the terminal unescaped — while `names` says in the same
+    // breath that nothing has ever been set on the session.
+    const junk = { alias: '\x1b[31m\x1b[0m', first_prompt_preview: 'the real question' };
+    assert.deepEqual(nameValuesFromSession(junk), {
+      // No `alias` key at all: a mirror that cleans to nothing is not a name,
+      // and the chain has to fall THROUGH it rather than stop on an empty
+      // string that renders as a blank label.
+      [CHANNEL_FIRST_PROMPT]: 'the real question',
+    });
+    assert.equal(displayNameForSession(junk).display_name, 'the real question');
+    assert.equal(displayNameForSession(junk).display_name_channel, CHANNEL_FIRST_PROMPT);
+    assert.equal(currentNameValue(junk, CHANNEL_ALIAS), null);
+  });
+
+  it('keeps the surviving text when the mirror is only partly junk', () => {
+    // The other side of the boundary: cleaning must not be an excuse to drop
+    // a real name. `\x1b[31mevil\x07name` still names the session "evil name".
+    const partial = { alias: '\x1b[31mevil\x07name', ai_title: 'plain\ntitle' };
+    assert.deepEqual(nameValuesFromSession(partial), {
+      [CHANNEL_ALIAS]: 'evil name',
+      [CHANNEL_CC_AI_TITLE]: 'plain title',
+    });
+    assert.equal(currentNameValue(partial, CHANNEL_ALIAS), 'evil name');
+  });
+
+  it('the cleaned mirror compares equal to the cleaned observation', () => {
+    // This is the fallback's actual job. The harvester suppresses a `name_set`
+    // when the channel already holds the value it just observed, and the
+    // observation was sanitised on the way in. A raw mirror would never match
+    // it, so the suppression would invert into one event per SessionStart for
+    // as long as the record kept its pre-0.3.0 shape.
+    const raw = 'my\u200b title';
+    const legacyRecord = { ai_title: raw };
+    assert.equal(currentNameValue(legacyRecord, CHANNEL_CC_AI_TITLE), sanitizeNameValue(raw));
   });
 
   it('a names[] entry wins over the legacy mirror, including when cleared', () => {

@@ -117,6 +117,26 @@ export function applyNameToSession(session: any, change: any): boolean;
  * Both sides are already-normalised shapes (`{value, source}`), so the same
  * predicate serves the projection reducer and the history fold — the two must
  * agree, or `names` reports a superseded value that is still current.
+ *
+ * ## Known boundary: comparison is by code units, not by Unicode equivalence
+ *
+ * "normalised" above means *shape*, not *Unicode*. `é` written NFC (U+00E9)
+ * and `é` written NFD (U+0065 U+0301) look identical in every terminal and
+ * compare unequal here, so a macOS filesystem or an IME that hands over the
+ * decomposed form re-records a name that visibly did not change — one extra
+ * `set_count`, one extra history row, same displayed string.
+ *
+ * Left alone deliberately, for now. NFC-folding at this comparison only would
+ * make the predicate disagree with the value actually stored (which is not
+ * folded), so the honest fix normalises on the WRITE path — and that changes
+ * the bytes going into `events.jsonl`, which is an append-only log whose
+ * existing rows would then compare unequal to everything written after. That
+ * is a migration, not a one-line change, and the failure mode it prevents is
+ * a duplicate history row rather than a wrong name.
+ *
+ * The write-side sanitiser is the place to do it if it is ever worth doing:
+ * `sanitizeFirstPrompt` already NFKC-normalises, so the precedent and the
+ * placement both exist.
  */
 export function isSameNaming(a: any, b: any): boolean;
 /** The stored entry for one channel, or null. */
@@ -129,6 +149,13 @@ export function findNameEntry(session: any, channel: any): any;
  * without the fallback every such session would look unnamed until something
  * rewrote it — which would also make the hook's change-detection re-emit an
  * event for all 355 of them.
+ *
+ * The fallback is sanitised for the same reason it exists. Its consumer in
+ * this repo is the harvester's "has this channel changed?" check, and the
+ * value it is compared against was cleaned on the way in. A legacy mirror holding raw
+ * bytes would therefore never compare equal to the cleaned observation of the
+ * same name, and the suppression this fallback was written to provide would
+ * invert into an event on every single SessionStart, forever.
  */
 export function currentNameValue(session: any, channel: any): any;
 /**
