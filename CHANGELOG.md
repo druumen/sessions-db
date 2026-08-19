@@ -197,6 +197,11 @@ Found by an independent review of this release before it shipped.
   Indic scripts need them. The sanitiser is idempotent, which the reducer's
   change detection depends on.
 
+  `first_prompt_preview` is cleaned for DISPLAY only — it is the last
+  resort of the display chain and holds raw user input, but
+  `first_human_prompt_v1` hashes the stored field, so rewriting it would
+  re-key every fingerprint on disk.
+
 - **`source` had three different defaults** across `setName`,
   `nameSetPayload` and `nameChangeFromEvent`. They now all default to
   `harvest`: the axis exists so a consumer can ask which names a *person* gave

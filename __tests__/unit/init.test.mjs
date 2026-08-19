@@ -33,6 +33,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { initProjection } from '../../lib/init.mjs';
+import { emptyProjection } from '../../lib/projection.mjs';
 
 function mkTmp() {
   return mkdtempSync(join(tmpdir(), 'sessions-db-init-'));
@@ -63,6 +64,16 @@ describe('initProjection', () => {
       // projection.json parses + has the empty-projection shape
       const proj = JSON.parse(readFileSync(projectionPath, 'utf8'));
       assert.equal(proj._meta.schema_version, 2);
+      // `init.mjs` deliberately duplicates the _meta literal rather than
+      // importing `emptyProjection()`, so it can drift. It must not drift on
+      // this field: an unstamped cache is read as one that predates the name
+      // model, which makes `loadProjection` fold the whole event log on every
+      // read until something writes — a standing cost for a file that was born
+      // correct.
+      assert.equal(
+        proj._meta.names_model_version,
+        emptyProjection()._meta.names_model_version,
+      );
       assert.deepEqual(
         proj._meta.fingerprint_versions,
         ['first_human_prompt_v1', 'lineage_prefix_v1'],

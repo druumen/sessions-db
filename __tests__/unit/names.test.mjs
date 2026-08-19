@@ -628,3 +628,31 @@ describe('names.mjs — hasAnyName', () => {
     assert.equal(hasAnyName({ names: [{ channel: CHANNEL_ALIAS, value: null }] }), true);
   });
 });
+
+describe('names.mjs — the fallback channel is display-safe too', () => {
+  it('cleans first_prompt_preview for display without touching the stored field', () => {
+    // `first_prompt_preview` is the last resort of the display chain, so it
+    // reaches a terminal like every other name — but it holds raw user input,
+    // and `sanitizeFirstPrompt` strips harness wrappers, not control bytes.
+    // The stored field must NOT be rewritten: `first_human_prompt_v1` hashes
+    // it, and re-keying every fingerprint on disk would break identity
+    // reconciliation.
+    const session = { first_prompt_preview: 'why does\nthe goal\x1b[31m blow up' };
+    const values = nameValuesFromSession(session);
+    assert.equal(values[CHANNEL_FIRST_PROMPT], 'why does the goal blow up');
+    assert.equal(
+      session.first_prompt_preview,
+      'why does\nthe goal\x1b[31m blow up',
+      'the record itself is untouched — the fingerprint depends on it',
+    );
+    assert.equal(
+      displayNameForSession(session).display_name,
+      'why does the goal blow up',
+    );
+  });
+
+  it('a preview that is nothing but control bytes is not a name', () => {
+    const values = nameValuesFromSession({ first_prompt_preview: '\x1b[2K' });
+    assert.equal(CHANNEL_FIRST_PROMPT in values, false);
+  });
+});
