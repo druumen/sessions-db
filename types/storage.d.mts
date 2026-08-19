@@ -110,6 +110,10 @@ export function readAllEvents(opts?: {
  * Load the projection cache from disk. On missing/corrupt file, falls back
  * to a full rebuild from events.jsonl.
  *
+ * ## Also repairs a cache that predates the current name model
+ *
+ * See `backfillNamesModel`.
+ *
  * @param {{ paths?: typeof PATHS, root?: string }} [opts]
  * @returns {Promise<object>}
  */

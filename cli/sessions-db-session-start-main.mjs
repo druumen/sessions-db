@@ -48,6 +48,7 @@ import { join } from 'node:path';
 import {
   extractLatestTitles,
   findTranscriptByCsid,
+  isMachineGeneratedCustomTitle,
   parseTranscriptFile,
   workspaceHashFromCwd,
 } from '../lib/transcript.mjs';
@@ -62,7 +63,7 @@ import {
   isValidNameValue,
   nameSetPayload,
 } from '../lib/names.mjs';
-import { sanitizeFirstPrompt } from '../lib/sanitize.mjs';
+import { sanitizeFirstPrompt, sanitizeNameValue } from '../lib/sanitize.mjs';
 import {
   loadProjection,
   newEvent,
@@ -335,8 +336,11 @@ async function main() {
   // Spam suppression: only append when a harvested value differs from what the
   // projection already holds for that channel. Best-effort (loadProjection
   // happens outside the lock, so there is a small race with a concurrent hook
-  // for the same session) but the reducer is idempotent, so a duplicate costs
-  // log bytes, never correctness.
+  // for the same session) but the reducer treats a naming that re-asserts the
+  // current value as a no-op, so a duplicate costs log bytes, never
+  // correctness. That second half only became true once `set_count` stopped
+  // self-incrementing — before that, the race added a phantom rename that no
+  // rebuild could remove, because the duplicate event is in the log forever.
   if (recordResult && recordResult.ok && typeof recordResult.stableId === 'string') {
     try {
       await harvestNames({
@@ -420,11 +424,27 @@ async function harvestNames({ stableId, transcriptPath, recordTargetOpts }) {
   // so neither a person nor a model authored it as a name. It is also
   // deliberately outside the display chain (lib/names.mjs explains why —
   // measured, it mirrors `ai_title` exactly).
+  //
+  // `custom-title` is the field a person types into, EXCEPT for the one shape
+  // Claude Code writes into it itself when a session is resumed from the
+  // picker. That one is demoted to `harvest` — see
+  // `isMachineGeneratedCustomTitle`.
+  //
+  // Values are sanitised here, before the change comparison, and not only
+  // inside `nameSetPayload`. Comparing a raw transcript value against a
+  // sanitised stored one would report "changed" on every single SessionStart
+  // for any session whose title contains a tab or a stray control byte, and
+  // this hook fires on every start.
+  const customTitle = sanitizeNameValue(titles.customTitle ?? '');
   const candidates = [
-    { channel: CHANNEL_CC_AI_TITLE, value: titles.aiTitle, source: SOURCE_LLM },
-    { channel: CHANNEL_CC_CUSTOM_TITLE, value: titles.customTitle, source: SOURCE_HUMAN },
-    { channel: CHANNEL_AGENT_NAME, value: titles.agentName, source: SOURCE_HARVEST },
-  ].filter((c) => typeof c.value === 'string' && c.value.length > 0 && isValidNameValue(c.value));
+    { channel: CHANNEL_CC_AI_TITLE, value: sanitizeNameValue(titles.aiTitle ?? ''), source: SOURCE_LLM },
+    {
+      channel: CHANNEL_CC_CUSTOM_TITLE,
+      value: customTitle,
+      source: isMachineGeneratedCustomTitle(customTitle) ? SOURCE_HARVEST : SOURCE_HUMAN,
+    },
+    { channel: CHANNEL_AGENT_NAME, value: sanitizeNameValue(titles.agentName ?? ''), source: SOURCE_HARVEST },
+  ].filter((c) => isValidNameValue(c.value) && c.value !== null && c.value.length > 0);
   if (candidates.length === 0) return;
 
   // One load for all three change checks. `currentNameValue` falls back to the

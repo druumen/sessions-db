@@ -31,12 +31,16 @@ export function setAlias(opts: {
  * Canonical payload for an alias write. Shared with `cli/alias.mjs --dry-run`
  * so the preview and the write cannot diverge.
  *
- * @param {string|null} value
+ * The `alias_set` shape (`{ alias }`), not `{ channel, value, source }` —
+ * see `setAlias` for why the legacy op is still the one being written. The
+ * channel, the `human` source and the display precedence are all derived
+ * from the op by `nameChangeFromEvent`, so nothing is lost by not spelling
+ * them out.
+ *
+ * @param {string|null} value already sanitised by the caller
  */
 export function aliasSetPayload(value: string | null): {
-    channel: string;
-    value: string;
-    source: string;
+    alias: string;
 };
 /**
  * Set or clear a name on any channel.

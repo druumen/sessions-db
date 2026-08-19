@@ -18,7 +18,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -337,6 +337,272 @@ describe('sessions-db search — a projection cache written before names[]', () 
       // dressed up as a new feature.
       assert.equal(out[0].display_name, OLD_TITLE);
       assert.equal(out[0].display_name_channel, 'cc_ai_title');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('sessions-db names — a repeat is not a rename', () => {
+  const SID_DUP = 'sess_dddddddd-4444-7000-8000-000000000004';
+
+  /** Two `alias <id> "X"` runs with the SAME string, which is all it took. */
+  function plantDuplicateAlias() {
+    const root = mkTmp();
+    const dir = join(root, 'tickets/_logs');
+    mkdirSync(dir, { recursive: true });
+    const events = [
+      ev('session_seen', SID_DUP, {
+        claude_session_id: '44444444-4444-4444-8444-444444444444',
+      }, '2026-06-01T10:00:00.000Z'),
+      ev('alias_set', SID_DUP, { alias: 'pinned' }, '2026-06-01T10:01:00.000Z'),
+      ev('alias_set', SID_DUP, { alias: 'pinned' }, '2026-06-01T10:02:00.000Z'),
+    ];
+    writeFileSync(
+      join(dir, 'sessions-db-events.jsonl'),
+      events.map((e) => JSON.stringify(e)).join('\n') + '\n',
+    );
+    return root;
+  }
+
+  it('reports no history at all for a value that never changed', async () => {
+    // No race, no replay — just the same command twice, which nothing stopped
+    // because `setAlias` has no change detection. The log is append-only, so
+    // once this was recorded as a rename `rebuild` could not take it back:
+    // the database believed forever that the session had been renamed.
+    const root = plantDuplicateAlias();
+    try {
+      const r = await runCLI(['names', SID_DUP, '--root', root, '--json']);
+      assert.equal(r.exitCode, 0, r.stderr);
+      const out = JSON.parse(r.stdout);
+      const alias = out.channels.find((c) => c.channel === 'alias');
+      assert.equal(alias.set_count, 1);
+      assert.equal(alias.history_count, 0);
+      assert.deepEqual(out.history.map((h) => h.kind), ['current']);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('the human output says so too', async () => {
+    const root = plantDuplicateAlias();
+    try {
+      const r = await runCLI(['names', SID_DUP, '--root', root]);
+      assert.equal(r.exitCode, 0, r.stderr);
+      assert.match(r.stdout, /history: none — every channel still holds its first value\./);
+      assert.equal(/superseded/.test(r.stdout), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('search --include-history does not report the live value as historical', async () => {
+    // The invariant the flag exists for: something still current must never
+    // also be reported as a former name, or "is called" and "was called"
+    // stop being distinguishable.
+    const root = plantDuplicateAlias();
+    try {
+      const r = await runCLI(['search', 'pinned', '--root', root, '--include-history', '--json']);
+      assert.equal(r.exitCode, 0, r.stderr);
+      const hit = JSON.parse(r.stdout).find((x) => x.stable_id === SID_DUP);
+      assert.ok(hit);
+      assert.deepEqual(hit.name_hits.map((h) => h.kind), ['current']);
+      assert.equal(hit.matched_in.includes('name_history:alias'), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('sessions-db names — a name cannot drive the terminal', () => {
+  const SID_HOSTILE = 'sess_eeeeeeee-5555-7000-8000-000000000005';
+
+  function plantHostileName() {
+    const root = mkTmp();
+    const dir = join(root, 'tickets/_logs');
+    mkdirSync(dir, { recursive: true });
+    const events = [
+      ev('session_seen', SID_HOSTILE, {
+        claude_session_id: '55555555-5555-4555-8555-555555555555',
+      }, '2026-06-01T10:00:00.000Z'),
+      // Written by a build without the sanitiser — the log is append-only, so
+      // rows like this are permanent and the READ path has to cope.
+      ev('name_set', SID_HOSTILE, {
+        channel: 'cc_custom_title',
+        value: '\x1b[31mred\nsecond line\x00and a nul',
+        source: 'human',
+      }, '2026-06-01T10:01:00.000Z'),
+    ];
+    writeFileSync(
+      join(dir, 'sessions-db-events.jsonl'),
+      events.map((e) => JSON.stringify(e)).join('\n') + '\n',
+    );
+    return root;
+  }
+
+  it('never prints a raw escape, newline or control byte from a stored name', async () => {
+    const root = plantHostileName();
+    try {
+      const r = await runCLI(['names', SID_HOSTILE, '--root', root]);
+      assert.equal(r.exitCode, 0, r.stderr);
+      assert.equal(r.stdout.includes('\x1b'), false, 'no raw ANSI escape reaches the tty');
+      assert.equal(r.stdout.includes('\x00'), false, 'no NUL reaches the tty');
+      assert.match(r.stdout, /cc_custom_title\s+human\s+\S+\s+1\s+red second line and a nul/);
+      // One row per channel: a newline in a value used to tear the table in
+      // two, which is how this was noticed. (The `display:` line names the
+      // channel too, hence matching on the row prefix rather than the name.)
+      const rows = r.stdout.split('\n').filter((l) => l.startsWith('cc_custom_title'));
+      assert.equal(rows.length, 1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('--json is clean too, so a machine consumer is not handed the bytes either', async () => {
+    const root = plantHostileName();
+    try {
+      const r = await runCLI(['names', SID_HOSTILE, '--root', root, '--json']);
+      const out = JSON.parse(r.stdout);
+      assert.equal(out.display_name, 'red second line and a nul');
+      assert.equal(out.channels[0].value, 'red second line and a nul');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('sessions-db names — same-millisecond ordering', () => {
+  const SID_TIE = 'sess_ffffffff-6666-7000-8000-000000000006';
+
+  it('lists a tie newest-first, like every other row in the list', async () => {
+    // One harvest pass writes every changed channel with a single
+    // `observedAt`, so ties are the normal case rather than a curiosity. The
+    // history array was built oldest-first per channel and then stable-sorted
+    // descending, which left equal keys reading oldest-first inside a
+    // newest-first list.
+    const root = mkTmp();
+    const dir = join(root, 'tickets/_logs');
+    mkdirSync(dir, { recursive: true });
+    const TIE = '2026-06-01T10:00:00.000Z';
+    const events = [
+      ev('session_seen', SID_TIE, { claude_session_id: '66666666-6666-4666-8666-666666666666' }, TIE),
+      ev('name_set', SID_TIE, { channel: 'cc_ai_title', value: 'first', source: 'llm', observed_at: TIE }, TIE),
+      ev('name_set', SID_TIE, { channel: 'cc_ai_title', value: 'second', source: 'llm', observed_at: TIE }, TIE),
+      ev('name_set', SID_TIE, { channel: 'cc_ai_title', value: 'third', source: 'llm', observed_at: TIE }, TIE),
+    ];
+    writeFileSync(
+      join(dir, 'sessions-db-events.jsonl'),
+      events.map((e) => JSON.stringify(e)).join('\n') + '\n',
+    );
+    try {
+      const r = await runCLI(['names', SID_TIE, '--root', root, '--json']);
+      assert.equal(r.exitCode, 0, r.stderr);
+      const out = JSON.parse(r.stdout);
+      assert.deepEqual(out.history.map((h) => h.value), ['third', 'second', 'first']);
+      assert.deepEqual(out.history.map((h) => h.kind), ['current', 'history', 'history']);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('sessions-db search — the default tier does not read the event log', () => {
+  it('answers identically with events.jsonl moved out of the way', async () => {
+    // The property, not just its consequence. The default path is documented
+    // as projection-only — that is what keeps it fast and keeps "why did this
+    // match?" answerable without a flag — and the only way to pin the
+    // property itself is to take the log away and see the answer not change.
+    const root = plantWorkspace();
+    try {
+      // Materialise the cache first. plantWorkspace ships a log and no cache,
+      // and with no cache `loadProjection` folds the log — which would make
+      // this test measure the fallback rather than the default path.
+      const rebuilt = await runCLI(['rebuild', '--root', root]);
+      assert.equal(rebuilt.exitCode, 0, rebuilt.stderr);
+
+      const before = await runCLI(['search', OLD_TITLE, '--root', root, '--json']);
+      assert.equal(before.exitCode, 0, before.stderr);
+
+      const log = join(root, 'tickets/_logs/sessions-db-events.jsonl');
+      renameSync(log, log + '.moved');
+      const after = await runCLI(['search', OLD_TITLE, '--root', root, '--json']);
+      assert.equal(after.exitCode, 0, after.stderr);
+      assert.deepEqual(JSON.parse(after.stdout), JSON.parse(before.stdout));
+
+      // ...and --include-history, which DOES read the log, degrades to the
+      // default answer rather than failing.
+      const hist = await runCLI([
+        'search', 'Fix HTTP 400', '--root', root, '--include-history', '--json',
+      ]);
+      assert.equal(hist.exitCode, 0, hist.stderr);
+      assert.equal(
+        JSON.parse(hist.stdout).some((x) => x.stable_id === SID_RENAMED),
+        false,
+        'with no log there is no history to find',
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('sessions-db search — a mirrored channel is one hit, not two', () => {
+  const SID_BADGE = 'sess_99999999-7777-7000-8000-000000000007';
+
+  it('does not report the same name twice because agent_name mirrors ai_title', async () => {
+    // Measured on the reference machine: every session carrying an agent
+    // badge had `agent_name` byte-identical to its `ai_title`. Reporting both
+    // gives a caller two `matched_in` labels and two `name_hits` for one
+    // name, so anything counting hits counts it twice.
+    const root = mkTmp();
+    const dir = join(root, 'tickets/_logs');
+    mkdirSync(dir, { recursive: true });
+    const TS = '2026-06-01T10:00:00.000Z';
+    const events = [
+      ev('session_seen', SID_BADGE, { claude_session_id: '77777777-7777-4777-8777-777777777777' }, TS),
+      ev('name_set', SID_BADGE, { channel: 'cc_ai_title', value: 'Analyze Knowledge Spine', source: 'llm' }, TS),
+      ev('name_set', SID_BADGE, { channel: 'agent_name', value: 'Analyze Knowledge Spine', source: 'harvest' }, TS),
+    ];
+    writeFileSync(
+      join(dir, 'sessions-db-events.jsonl'),
+      events.map((e) => JSON.stringify(e)).join('\n') + '\n',
+    );
+    try {
+      const r = await runCLI(['search', 'Knowledge Spine', '--root', root, '--json']);
+      assert.equal(r.exitCode, 0, r.stderr);
+      const hit = JSON.parse(r.stdout).find((x) => x.stable_id === SID_BADGE);
+      assert.ok(hit);
+      assert.deepEqual(hit.name_hits.map((h) => h.value), ['Analyze Knowledge Spine']);
+      // Registry order decides the survivor, so the label is the meaningful
+      // one rather than whichever key order happened to yield.
+      assert.deepEqual(hit.name_hits.map((h) => h.channel), ['cc_ai_title']);
+      assert.deepEqual(hit.matched_in, ['name:cc_ai_title']);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('still reports two hits when the two channels really differ', async () => {
+    const root = mkTmp();
+    const dir = join(root, 'tickets/_logs');
+    mkdirSync(dir, { recursive: true });
+    const TS = '2026-06-01T10:00:00.000Z';
+    const events = [
+      ev('session_seen', SID_BADGE, { claude_session_id: '77777777-7777-4777-8777-777777777777' }, TS),
+      ev('name_set', SID_BADGE, { channel: 'cc_ai_title', value: 'spine analysis', source: 'llm' }, TS),
+      ev('name_set', SID_BADGE, { channel: 'agent_name', value: 'spine analyst', source: 'harvest' }, TS),
+    ];
+    writeFileSync(
+      join(dir, 'sessions-db-events.jsonl'),
+      events.map((e) => JSON.stringify(e)).join('\n') + '\n',
+    );
+    try {
+      const r = await runCLI(['search', 'spine analy', '--root', root, '--json']);
+      const hit = JSON.parse(r.stdout).find((x) => x.stable_id === SID_BADGE);
+      assert.deepEqual(
+        hit.name_hits.map((h) => h.channel).sort(),
+        ['agent_name', 'cc_ai_title'],
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

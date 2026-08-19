@@ -28,6 +28,17 @@
  * (esbuild) so type signatures match across both .d.mts re-exports
  * (ESM source paths) and the .cjs bundle (which contains the same
  * symbols).
+ *
+ * That "identical" is a claim, not a mechanism — tsc emits `.d.mts`
+ * from `lib/` and never touches this file, so it is maintained by
+ * hand and it HAS drifted: 0.3.0 added five name-model type names to
+ * `index.d.ts` and not here, leaving the CJS consumer this file exists
+ * to serve unable to import any of them. Two checks now stand behind
+ * the claim, both in `__tests__/types-smoke/`:
+ * `cockpit-require.cts` compiles a real CJS consumer against THIS
+ * file, and `types-smoke.test.mjs` diffs the two export lists directly
+ * so a name added to one and not the other fails immediately rather
+ * than at some consumer's next install.
  */
 
 // Runtime VALUES (functions + constants) + their inferred TypeScript types,
@@ -51,6 +62,12 @@ export type {
   IdentitySource,
   IdentityConfidence,
   EventOp,
+  // Names (0.3.0) — channel/source are open strings by contract, see lib/names.mjs
+  NameChannel,
+  NameSource,
+  SessionName,
+  NameHistoryEntry,
+  ResolvedDisplayName,
   // Composite shapes
   TranscriptFile,
   IdentityResolution,

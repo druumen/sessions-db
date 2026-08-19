@@ -841,3 +841,79 @@ describe('prune handler — spawned CLI integration', () => {
     assert.match(r.stdout, /^Usage: sessions-db prune/);
   });
 });
+
+describe('prune handler — a name on ANY channel is operator intent', () => {
+  it('spares a record whose only name is a hand-typed cc_custom_title', async () => {
+    // The failure this pins: criterion 6 checked `s.alias` and `s.ai_title`,
+    // two fields, while the name model made the channel set open. A session
+    // named only through `cc_custom_title` — the surface the model itself
+    // calls the strongest statement of intent any namer produces — was a
+    // ghost by every enumerated criterion and got deleted.
+    await assertSpared({
+      names: [{
+        channel: 'cc_custom_title', value: 'My Hand Typed Name',
+        set_at: isoAgo(GHOST_AGE_MS), source: 'human', set_count: 1,
+      }],
+    }, 'has_name');
+  });
+
+  it('spares a record named through a channel this build never heard of', async () => {
+    // The point of an open channel set is that adding a namer is a non-event.
+    // An enumerated check here would be one release stale behind every new
+    // one, and stale means deleting somebody's name.
+    await assertSpared({
+      names: [{ channel: 'dru_cli_label', value: 'set by a newer build', source: 'plugin', set_count: 1 }],
+    }, 'has_name');
+  });
+
+  it('spares a record whose name was deliberately cleared', async () => {
+    // A null-valued entry exists precisely because somebody named the session
+    // and then unnamed it. Both halves of that are a person having touched
+    // the record.
+    await assertSpared({
+      names: [{ channel: 'cc_custom_title', value: null, source: 'human', set_count: 2 }],
+    }, 'has_name');
+  });
+
+  it('still deletes a record with an empty names list', async () => {
+    // The invariant-false side: `names: []` must not become a blanket
+    // amnesty, or prune stops doing its job the moment any record is written
+    // by a current build.
+    const root = mkTmp();
+    try {
+      plantProjection(root, [mkGhost(SID_A, { names: [] })]);
+      const r = await runHandler(pruneMod, ['--root', root, '--json']);
+      assert.equal(r.exitCode, 0, r.stderr);
+      const parsed = JSON.parse(r.stdout);
+      assert.equal(parsed.count, 1);
+      assert.equal(parsed.candidates[0].stable_id, SID_A);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('end-to-end: the named record is still there after prune --yes, and names can read it', async () => {
+    const root = mkTmp();
+    try {
+      plantProjection(root, [
+        mkGhost(SID_A, {
+          names: [{
+            channel: 'cc_custom_title', value: 'My Hand Typed Name',
+            set_at: isoAgo(GHOST_AGE_MS), source: 'human', set_count: 1,
+          }],
+        }),
+        mkGhost(SID_B),
+      ]);
+      const r = await runCLI(['prune', '--root', root, '--yes']);
+      assert.equal(r.exitCode, 0, r.stderr);
+
+      const proj = await loadProjection({ root });
+      assert.ok(proj.sessions[SID_A], 'the named session survives');
+      assert.equal(proj.sessions[SID_B], undefined, 'the real ghost still goes');
+      const tombstones = eventsLines(root).filter((e) => e.op === 'session_prune');
+      assert.deepEqual(tombstones.map((e) => e.stable_id), [SID_B]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

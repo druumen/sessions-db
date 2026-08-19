@@ -9,6 +9,7 @@ import {
   CHANNEL_FIRST_PROMPT,
   MAX_CHANNELS_PER_SESSION,
   MAX_NAME_VALUE_LEN,
+  MAX_OBSERVED_FROM_LEN,
   NAME_PRECEDENCE,
   SOURCE_HARVEST,
   SOURCE_HUMAN,
@@ -18,6 +19,8 @@ import {
   displayNameForSession,
   findNameEntry,
   foldNameHistory,
+  hasAnyName,
+  isIso8601,
   isKnownChannel,
   isValidChannel,
   isValidNameValue,
@@ -25,6 +28,7 @@ import {
   nameChangeFromEvent,
   nameSetPayload,
   nameValuesFromSession,
+  normalizeObservedFrom,
   resolveDisplayName,
   sortChannels,
   splitChannelHistory,
@@ -425,5 +429,202 @@ describe('names.mjs — sortChannels', () => {
       sortChannels(['zzz_future', CHANNEL_CC_AI_TITLE, 'aaa_future', CHANNEL_ALIAS, CHANNEL_AGENT_NAME]),
       [CHANNEL_ALIAS, CHANNEL_CC_AI_TITLE, CHANNEL_AGENT_NAME, 'aaa_future', 'zzz_future'],
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review fixes: idempotency, sanitisation, timestamp typing, bounds.
+// ---------------------------------------------------------------------------
+
+describe('names.mjs — a naming that changes nothing IS nothing', () => {
+  it('applyNameToSession leaves the record byte-identical and answers false', () => {
+    const session = { names: [] };
+    const change = { channel: CHANNEL_ALIAS, value: 'pinned', source: SOURCE_HUMAN, set_at: TS_A };
+    assert.equal(applyNameToSession(session, change), true);
+    const snapshot = JSON.parse(JSON.stringify(session.names));
+
+    // Same naming, later timestamp — a second `alias <id> "pinned"`, or the
+    // same event reaching the reducer twice off a cold cache.
+    assert.equal(
+      applyNameToSession(session, { ...change, set_at: TS_B }),
+      false,
+      'nothing changed, so the reducer must say so',
+    );
+    assert.deepEqual(session.names, snapshot);
+    assert.equal(session.names[0].set_count, 1);
+    assert.equal(session.names[0].set_at, TS_A, 'set_at marks the real set, not the re-assertion');
+  });
+
+  it('still counts a real rename, and a rename back', () => {
+    const session = { names: [] };
+    for (const value of ['A', 'B', 'A']) {
+      applyNameToSession(session, { channel: CHANNEL_ALIAS, value, source: SOURCE_HUMAN, set_at: TS_A });
+    }
+    assert.equal(findNameEntry(session, CHANNEL_ALIAS).set_count, 3);
+    assert.equal(findNameEntry(session, CHANNEL_ALIAS).value, 'A');
+  });
+
+  it('counts a clear, and counts naming it again after a clear', () => {
+    const session = { names: [] };
+    applyNameToSession(session, { channel: CHANNEL_ALIAS, value: 'x', source: SOURCE_HUMAN, set_at: TS_A });
+    applyNameToSession(session, { channel: CHANNEL_ALIAS, value: null, source: SOURCE_HUMAN, set_at: TS_B });
+    // Clearing twice is still one clear.
+    applyNameToSession(session, { channel: CHANNEL_ALIAS, value: null, source: SOURCE_HUMAN, set_at: TS_B });
+    assert.equal(findNameEntry(session, CHANNEL_ALIAS).set_count, 2);
+    applyNameToSession(session, { channel: CHANNEL_ALIAS, value: 'x', source: SOURCE_HUMAN, set_at: TS_B });
+    assert.equal(findNameEntry(session, CHANNEL_ALIAS).set_count, 3);
+  });
+
+  it('treats a different author as a different fact', () => {
+    const session = { names: [] };
+    applyNameToSession(session, { channel: 'x_ch', value: 'same', source: SOURCE_HARVEST, set_at: TS_A });
+    assert.equal(
+      applyNameToSession(session, { channel: 'x_ch', value: 'same', source: SOURCE_HUMAN, set_at: TS_B }),
+      true,
+    );
+    assert.equal(findNameEntry(session, 'x_ch').set_count, 2);
+    assert.equal(findNameEntry(session, 'x_ch').source, SOURCE_HUMAN);
+  });
+
+  it('foldNameHistory drops the repeat, so nothing current is also reported historical', () => {
+    // The user-visible failure: `alias <id> "X"` run twice made `names` say
+    // "1 superseded" and list the live value under both current and history.
+    const dup = [
+      evt('alias_set', { alias: 'X' }, { id: '1' }),
+      evt('alias_set', { alias: 'X' }, { ts: TS_B, id: '2' }),
+    ];
+    const entries = foldNameHistory(dup).get(SID).get(CHANNEL_ALIAS);
+    assert.equal(entries.length, 1);
+    assert.deepEqual(splitChannelHistory(entries).history, []);
+  });
+
+  it('foldNameHistory still keeps a value that was dropped and restored', () => {
+    // Only the IMMEDIATELY preceding entry is compared. Renamed-away-and-back
+    // is two real renames and both have to survive.
+    const back = [
+      evt('name_set', { channel: CHANNEL_ALIAS, value: 'X', source: SOURCE_HUMAN }, { id: 'a' }),
+      evt('name_set', { channel: CHANNEL_ALIAS, value: 'Y', source: SOURCE_HUMAN }, { ts: TS_B, id: 'b' }),
+      evt('name_set', { channel: CHANNEL_ALIAS, value: 'X', source: SOURCE_HUMAN }, { ts: TS_B, id: 'c' }),
+    ];
+    assert.equal(foldNameHistory(back).get(SID).get(CHANNEL_ALIAS).length, 3);
+  });
+
+  it('agrees with the projection: same log, same set_count either way', () => {
+    // The history reader and the reducer must not disagree, or `names` shows
+    // a superseded value that the projection says is still current.
+    const log = [
+      evt('ai_title_seen', { ai_title: 'one', observed_at: TS_A }, { id: '1' }),
+      evt('ai_title_seen', { ai_title: 'one', observed_at: TS_B }, { ts: TS_B, id: '2' }),
+      evt('ai_title_seen', { ai_title: 'two', observed_at: TS_B }, { ts: TS_B, id: '3' }),
+    ];
+    const session = { names: [] };
+    for (const e of log) applyNameToSession(session, nameChangeFromEvent(e));
+    assert.equal(
+      findNameEntry(session, CHANNEL_CC_AI_TITLE).set_count,
+      foldNameHistory(log).get(SID).get(CHANNEL_CC_AI_TITLE).length,
+    );
+  });
+});
+
+describe('names.mjs — values are safe to print', () => {
+  it('isValidNameValue refuses anything the sanitiser would rewrite', () => {
+    assert.equal(isValidNameValue('ordinary name'), true);
+    assert.equal(isValidNameValue(null), true);
+    assert.equal(isValidNameValue('\x1b[31mred'), false, 'ANSI escape');
+    assert.equal(isValidNameValue('two\nlines'), false, 'newline');
+    assert.equal(isValidNameValue('nul\x00byte'), false, 'control byte');
+    assert.equal(isValidNameValue('  padded'), false, 'untrimmed is not canonical');
+  });
+
+  it('nameChangeFromEvent sanitises a value written by an older build', () => {
+    // The log is append-only: rows written before the sanitiser existed still
+    // have to be safe by the time they reach a terminal.
+    const change = nameChangeFromEvent(evt('name_set', {
+      channel: CHANNEL_CC_CUSTOM_TITLE, value: '\x1b[2Kredesign\nBM', source: SOURCE_HUMAN,
+    }));
+    assert.equal(change.value, 'redesign BM');
+  });
+
+  it('nameSetPayload sanitises so the log never holds the raw bytes', () => {
+    const payload = nameSetPayload({
+      channel: CHANNEL_CC_CUSTOM_TITLE, value: 'a\x1b[0mb', source: SOURCE_HUMAN,
+    });
+    assert.equal(payload.value, 'ab');
+  });
+
+  it('a value that is nothing but escapes becomes a clear, not a stored blank', () => {
+    // Empty string is not a name. Reporting it as `null` keeps the one
+    // distinction the model cares about — cleared vs never named — intact.
+    assert.equal(nameSetPayload({ channel: CHANNEL_ALIAS, value: '\x1b[2K' }).value, null);
+  });
+});
+
+describe('names.mjs — set_at is a timestamp, not any string', () => {
+  it('isIso8601 accepts what the writers emit and refuses the rest', () => {
+    assert.equal(isIso8601('2026-08-19T01:02:03.000Z'), true);
+    assert.equal(isIso8601('2026-08-19T01:02:03+02:00'), true);
+    assert.equal(isIso8601('not-a-date'), false);
+    assert.equal(isIso8601('2026-13-01T00:00:00Z'), false, 'right shape, not a real instant');
+    assert.equal(isIso8601(''), false);
+    assert.equal(isIso8601(null), false);
+  });
+
+  it('a junk observed_at falls back to the event ts instead of poisoning set_at', () => {
+    // Dropping the whole name over a bad timestamp would lose more than it
+    // protects; carrying "not-a-date" into a field typed Iso8601 lies to
+    // every consumer that sorts or renders it.
+    const change = nameChangeFromEvent(evt('name_set', {
+      channel: CHANNEL_ALIAS, value: 'v', source: SOURCE_HUMAN, observed_at: 'not-a-date',
+    }));
+    assert.equal(change.value, 'v');
+    assert.equal(change.set_at, TS_A);
+  });
+
+  it('a junk event ts leaves set_at null rather than a fake instant', () => {
+    const change = nameChangeFromEvent({
+      ts: 'whenever', event_id: 'evt_x', op: 'alias_set', stable_id: SID, payload: { alias: 'v' },
+    });
+    assert.equal(change.set_at, null);
+  });
+
+  it('nameSetPayload omits an unparseable observedAt', () => {
+    const payload = nameSetPayload({ channel: CHANNEL_ALIAS, value: 'v', observedAt: 'not-a-date' });
+    assert.equal('observed_at' in payload, false);
+    assert.equal(nameSetPayload({ channel: CHANNEL_ALIAS, value: 'v', observedAt: TS_B }).observed_at, TS_B);
+  });
+});
+
+describe('names.mjs — observed_from is bounded like everything else', () => {
+  it('drops provenance that would blow the event budget, keeping the name', () => {
+    // An event over MAX_EVENT_BYTES is refused outright, and the refusal
+    // never mentions that a name was lost. The name is the payload; the path
+    // is the footnote, so the footnote is what gets dropped.
+    const huge = '/t/' + 'x'.repeat(MAX_OBSERVED_FROM_LEN);
+    const payload = nameSetPayload({ channel: CHANNEL_ALIAS, value: 'kept', observedFrom: huge });
+    assert.equal(payload.value, 'kept');
+    assert.equal('observed_from' in payload, false);
+    assert.equal(normalizeObservedFrom(huge), null);
+    assert.equal(normalizeObservedFrom('/t/a.jsonl'), '/t/a.jsonl');
+  });
+
+  it('sanitises provenance too — it is rendered, so it is untrusted', () => {
+    assert.equal(normalizeObservedFrom('/t/\x1b[31ma.jsonl'), '/t/a.jsonl');
+  });
+});
+
+describe('names.mjs — hasAnyName', () => {
+  it('sees a name on ANY channel, including one this build never heard of', () => {
+    // Channel-agnostic on purpose: prune consumes this, and an enumerated
+    // check would go one release stale behind every new namer — which means
+    // deleting a record whose only name came through a channel it did not
+    // recognise.
+    assert.equal(hasAnyName({ names: [{ channel: 'dru_cli_label', value: 'x' }] }), true);
+    assert.equal(hasAnyName({ names: [] }), false);
+    assert.equal(hasAnyName({}), false);
+    assert.equal(hasAnyName(null), false);
+  });
+
+  it('counts a cleared entry — somebody named it and then unnamed it', () => {
+    assert.equal(hasAnyName({ names: [{ channel: CHANNEL_ALIAS, value: null }] }), true);
   });
 });

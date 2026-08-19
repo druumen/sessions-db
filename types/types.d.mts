@@ -361,10 +361,16 @@ export type KnownSession = {
  * Cache file `_meta` block.
  */
 export type ProjectionMeta = {
-    /**
-     *           Pinned to `2` — bump when reducer semantics change
-     */
     schema_version: 2;
+    /**
+     * Which build of the name model materialised `names[]`. Absent on
+     * any projection written before 0.3.0; `loadProjection` treats
+     * absent-or-older as "this cache predates the model" and rebuilds
+     * from the event log. Distinct from `schema_version`, which pins
+     * the record SHAPE and stays 2.
+     * Pinned to `2` — bump when reducer semantics change
+     */
+    names_model_version?: number;
     /**
      *           Names of the fingerprint algorithms the writer emits
      *           (e.g. `['first_human_prompt_v1', 'lineage_prefix_v1']`)

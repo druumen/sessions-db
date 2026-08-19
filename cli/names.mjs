@@ -101,13 +101,19 @@ export function buildNamesView(allEvents, stableId) {
   });
 
   // One flat timeline across channels, newest first — that is the order the
-  // question "what was it called before?" wants to be answered in. Ties keep
-  // event order (stable sort), so two names set in the same millisecond still
-  // read in the order they were written.
+  // question "what was it called before?" wants to be answered in.
+  //
+  // Entries are pushed NEWEST FIRST per channel, not in event order. A stable
+  // sort keeps equal keys in input order, so feeding it oldest-first made
+  // same-millisecond entries come out oldest-first inside a newest-first
+  // list — the two names a single harvest pass writes are exactly that case,
+  // since they share one `observedAt`. Reversing the input is what makes the
+  // tie-break agree with the sort instead of fighting it.
   const history = [];
   for (const [channel, entries] of byChannel) {
     const lastIndex = entries.length - 1;
-    entries.forEach((entry, i) => {
+    [...entries].reverse().forEach((entry, revIndex) => {
+      const i = lastIndex - revIndex;
       history.push({
         channel,
         value: entry.value,

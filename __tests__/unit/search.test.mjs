@@ -167,16 +167,21 @@ describe('search — names on the metadata tier', () => {
 });
 
 describe('search — matchNameHistory', () => {
+  // Real ISO timestamps, not placeholders: `set_at` is typed `Iso8601|null`
+  // and an unparseable ts now falls back to null instead of being carried
+  // through verbatim.
+  const TS_1 = '2026-08-01T10:00:00.000Z';
+  const TS_2 = '2026-08-02T10:00:00.000Z';
   const events = [
-    { ts: 'T1', event_id: 'e1', op: 'ai_title_seen', stable_id: 'sess_x', payload: { ai_title: 'Fix HTTP 400 error' } },
-    { ts: 'T2', event_id: 'e2', op: 'name_set', stable_id: 'sess_x', payload: { channel: 'cc_ai_title', value: 'Analyze Knowledge Spine', source: 'llm' } },
+    { ts: TS_1, event_id: 'e1', op: 'ai_title_seen', stable_id: 'sess_x', payload: { ai_title: 'Fix HTTP 400 error' } },
+    { ts: TS_2, event_id: 'e2', op: 'name_set', stable_id: 'sess_x', payload: { channel: 'cc_ai_title', value: 'Analyze Knowledge Spine', source: 'llm' } },
   ];
 
   it('matches a superseded value and marks it historical', () => {
     const byChannel = foldNameHistory(events).get('sess_x');
     assert.deepEqual(matchNameHistory(byChannel, 'http 400'), [{
       channel: 'cc_ai_title', value: 'Fix HTTP 400 error',
-      set_at: 'T1', source: 'llm', kind: 'history',
+      set_at: TS_1, source: 'llm', kind: 'history',
     }]);
   });
 

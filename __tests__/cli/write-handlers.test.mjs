@@ -123,10 +123,11 @@ describe('alias handler', () => {
       plantProjection(root, [mkSession(SID_A)]);
       const r = await runHandler(aliasMod, [SID_A, 'demo-alias', '--root', root]);
       assert.equal(r.exitCode, 0, r.stderr);
-      // 0.3.0: the alias is one channel of the name model, so the wire op is
-      // `name_set`. `session.alias` stays as the derived view of that channel
-      // — existing consumers must not notice the change.
-      assert.match(r.stdout, /ok: name_set/);
+      // 0.3.0: the alias became one channel of the name model, but the wire
+      // op stays `alias_set` — the reducer feeds it into the channel model
+      // anyway, and keeping the old op is what lets an older reader on the
+      // same machine still fold an alias a human set.
+      assert.match(r.stdout, /ok: alias_set/);
       const proj = await loadProjection({ root });
       assert.equal(proj.sessions[SID_A].alias, 'demo-alias');
       assert.deepEqual(
@@ -136,8 +137,8 @@ describe('alias handler', () => {
       assert.equal(proj.sessions[SID_A].display_name, 'demo-alias');
       assert.equal(proj.sessions[SID_A].display_name_channel, 'alias');
       assert.equal(eventsLines(root).length, 1);
-      assert.equal(eventsLines(root)[0].op, 'name_set');
-      assert.equal(eventsLines(root)[0].payload.channel, 'alias');
+      assert.equal(eventsLines(root)[0].op, 'alias_set');
+      assert.deepEqual(eventsLines(root)[0].payload, { alias: 'demo-alias' });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

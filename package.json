@@ -69,7 +69,7 @@
     "build:types": "tsc -p tsconfig.json",
     "build:cjs": "esbuild lib/index.mjs --bundle --format=cjs --platform=node --target=node18 --outfile=lib/index.cjs",
     "build": "npm run build:types && npm run build:cjs",
-    "check:types-smoke": "tsc --noEmit -p __tests__/types-smoke/tsconfig.json",
+    "check:types-smoke": "tsc --noEmit -p __tests__/types-smoke/tsconfig.json && tsc --noEmit -p __tests__/types-smoke/tsconfig.cjs.json",
     "prepublishOnly": "npm run build",
     "test:lib": "find __tests__ -name '*.test.mjs' -type f -not -path '__tests__/hook/*' -print0 | xargs -0 node --test",
     "test:hooks": "find __tests__/hook -name '*.test.mjs' -type f -print0 | xargs -0 node --test --test-concurrency=1"

@@ -3,10 +3,12 @@
  * alias.
  * `sessions-db alias <stable_id> --clear` — remove the alias (sets to null).
  *
- * 0.3.0: the alias is one channel of the session name model, so this writes
- * a `name_set` event (channel `alias`, source `human`) rather than the old
- * `alias_set`. Reads still understand `alias_set` — the log is append-only —
- * and `session.alias` remains as a derived view of that channel.
+ * 0.3.0: the alias became one channel of the session name model (channel
+ * `alias`, source `human`), but the event written is still `alias_set`. The
+ * reducer feeds that op into the channel model as well as the legacy
+ * `session.alias` field, so the model gains nothing from a new op — while an
+ * older reader on the same machine can still fold it. See
+ * `lib/operations.setAlias`.
  *
  * Day 3 refactor: this handler is a thin wrapper around
  * `lib/operations.setAlias` — argparse + dry-run rendering + result-to-exit
@@ -16,6 +18,7 @@
  */
 
 import { aliasSetPayload, setAlias } from '../lib/operations.mjs';
+import { sanitizeNameValue } from '../lib/sanitize.mjs';
 import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
 import { renderDryRun, reportResult, reportStableIdNotFound } from './_write-helpers.mjs';
 
@@ -90,8 +93,8 @@ export async function run(argv) {
   if (dryRun) {
     // Same builder the write path uses, so the preview cannot describe an
     // event the real write would not have produced.
-    const payload = aliasSetPayload(clear ? null : aliasArg);
-    renderDryRun({ op: 'name_set', stableId, payload, json });
+    const payload = aliasSetPayload(clear ? null : sanitizeNameValue(aliasArg));
+    renderDryRun({ op: 'alias_set', stableId, payload, json });
     return;
   }
 
@@ -115,7 +118,7 @@ export async function run(argv) {
   }
 
   const code = reportResult({
-    result, op: 'name_set', stableId, json, quiet,
+    result, op: 'alias_set', stableId, json, quiet,
     extra: clear ? { cleared: true } : { alias: aliasArg },
   });
   if (code !== 0) process.exit(code);

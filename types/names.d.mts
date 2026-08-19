@@ -3,14 +3,33 @@ export function isValidChannel(channel: any): boolean;
 /** @returns {boolean} well-formed source token (NOT "is a known source") */
 export function isValidSource(source: any): boolean;
 /**
- * A name value is either a non-empty string within the length cap, or `null`.
+ * A name value is either a non-empty string within the length cap that is
+ * already safe to print, or `null`.
  *
  * `null` is load-bearing: clearing a name is "a history entry whose value is
  * null", not "delete the entry". Otherwise a clear is indistinguishable from
  * "never named", and the fact that somebody deliberately removed the name is
  * unrecoverable.
+ *
+ * "Already safe" is defined as a fixed point of `sanitizeNameValue`: a value
+ * carrying an ANSI escape, a NUL, a newline or a bidi override is refused
+ * rather than stored. Both entry points into the model (`nameSetPayload` on
+ * the write side, `nameChangeFromEvent` on the read side) sanitise before
+ * they get here, so in normal operation this predicate only ever sees clean
+ * input — which is exactly the point. It turns "we sanitise on the way in"
+ * from a convention into an invariant something can fail on, and it is what
+ * stops a caller reaching `applyNameToSession` directly with a value that
+ * would drive the terminal it is printed on.
  */
 export function isValidNameValue(value: any): boolean;
+/** @returns {boolean} well-formed ISO 8601 instant */
+export function isIso8601(value: any): boolean;
+/**
+ * Provenance string, or null. Same charset freedom as a path needs, bounded
+ * by `MAX_OBSERVED_FROM_LEN` and sanitised — it is rendered by `names --json`
+ * consumers and has no more claim to trust than the value it accompanies.
+ */
+export function normalizeObservedFrom(value: any): string;
 /** Is this channel one this build has a name for? Ordering / docs only. */
 export function isKnownChannel(channel: any): boolean;
 /**
@@ -76,11 +95,30 @@ export function nameSetPayload({ channel, value, source, observedFrom, observedA
  * decision would have quietly become a performance defect.
  *
  * `set_count` is the one concession: an O(1) counter that lets a UI say "this
- * has been renamed 4 times" without reading the event log.
+ * has been renamed 4 times" without reading the event log. It is also the
+ * only field in the whole projection that counts rather than overwrites,
+ * which is why the no-op check below is not an optimisation — it is what
+ * keeps this reducer idempotent like every other one. See the module header.
  *
  * @returns {boolean} whether the record changed
  */
 export function applyNameToSession(session: any, change: any): boolean;
+/**
+ * Do these two describe the same naming?
+ *
+ * Compared on `value` and `source` only. `value` because that is the name;
+ * `source` because authorship is a documented axis of the model — the same
+ * string attested by a person is a different fact from the same string
+ * scraped by a harvester, and collapsing them would lose the one question
+ * the axis exists to answer. `set_at` and `observed_from` are excluded:
+ * they say when and where the name was seen, not what it is, and including
+ * them would make every re-observation a rename again.
+ *
+ * Both sides are already-normalised shapes (`{value, source}`), so the same
+ * predicate serves the projection reducer and the history fold — the two must
+ * agree, or `names` reports a superseded value that is still current.
+ */
+export function isSameNaming(a: any, b: any): boolean;
 /** The stored entry for one channel, or null. */
 export function findNameEntry(session: any, channel: any): any;
 /**
@@ -93,6 +131,20 @@ export function findNameEntry(session: any, channel: any): any;
  * event for all 355 of them.
  */
 export function currentNameValue(session: any, channel: any): any;
+/**
+ * Has ANY namer ever spoken about this session?
+ *
+ * Channel-agnostic on purpose. The channel set is open, so an enumerated
+ * "did somebody set an alias or a title" check goes stale the moment a new
+ * namer ships — and the consumer of this question is `prune`, where going
+ * stale means deleting a record whose only name came through a channel the
+ * pruner had not heard of.
+ *
+ * A cleared entry (`value: null`) counts. The entry exists precisely because
+ * somebody named the session and then unnamed it; that is a person having
+ * touched the record, which is the thing being tested for.
+ */
+export function hasAnyName(session: any): any;
 /**
  * Build the `{ channel: value }` map the precedence engine consumes, from a
  * session record. Includes the `first_prompt` pseudo-channel.
@@ -156,6 +208,13 @@ export function displayNameForSession(session: object, opts?: {
  * is that channel's current value — which is how a reader distinguishes "you
  * matched the name it has now" from "you matched a name it used to have".
  *
+ * An event that re-asserts the value a channel already holds is skipped, for
+ * the same reason `applyNameToSession` treats it as a no-op: it is not a
+ * rename. Skipping it here is not cosmetic — without it, running
+ * `alias <id> "X"` twice makes `names` report "1 superseded" and list the
+ * live value under both `current` and `history`, i.e. exactly the state the
+ * `kind` flag exists to rule out.
+ *
  * @param {Array<object>} events
  * @param {{ stableId?: string }} [opts] restrict to one session (cheaper)
  * @returns {Map<string, Map<string, Array<object>>>} stable_id → channel → entries
@@ -180,72 +239,6 @@ export function splitChannelHistory(entries: any): {
  * hidden — that is the whole contract behind an open channel set.
  */
 export function sortChannels(channels: any): any[];
-/**
- * The session **name model** — channels, sources, precedence, history.
- *
- * A session is named by several independent parties, and before this module
- * existed only two of them reached the database, each as a single flat field
- * that the next observation overwrote. That lost two different things: the
- * names nobody collected (`custom-title`, the one a human typed by hand), and
- * every value a channel ever held before its current one.
- *
- * The model here is one **entry per channel**, plus the history that produced
- * it:
- *
- *   { channel, value, set_at, source, observed_from? }
- *
- * Two axes, deliberately not collapsed into one:
- *
- *  - `channel` — WHICH naming surface this value came from. Open string (see
- *    "Channel registry" below): adding a namer must be a non-event, and
- *    pre-reserving names would only encode today's guesses into the schema.
- *  - `source`  — WHO authored the value: `human` | `llm` | `harvest`. NOT a
- *    synonym for channel. `cc_ai_title` and `cc_custom_title` both arrive via
- *    the same harvesting hook, but one was written by a model and the other
- *    typed by a person. Without this axis you cannot ask "show me only the
- *    names a human ever gave this session", which is the question that
- *    distinguishes intent from drift.
- *
- * ## Channel registry (documented, not enumerated in code)
- *
- * | channel            | who sets it                          | source    | in display chain |
- * |--------------------|--------------------------------------|-----------|------------------|
- * | `alias`            | `sessions-db alias` (operator)       | `human`   | yes — highest    |
- * | `cc_custom_title`  | Claude Code UI rename (user typed)   | `human`   | yes              |
- * | `cc_ai_title`      | Claude Code LLM-generated title      | `llm`     | yes              |
- * | `agent_name`       | agent-team badge on the transcript   | `harvest` | **no**           |
- * | `first_prompt`     | pseudo-channel: `first_prompt_preview` | —       | yes — last resort|
- *
- * `agent_name` is deliberately outside the display chain: measured on the
- * reference machine, all 7 sessions carrying that record had an `agent_name`
- * byte-identical to their `ai_title` — it is a mirror, not an independent
- * name, and promoting it would only add a way for the display to flip
- * between two spellings of the same string. It is still recorded, because a
- * badge ("this session is agent X") is a real fact about the session.
- *
- * `first_prompt` is a pseudo-channel: it never appears in `session.names[]`
- * (nobody "sets" it — it is latched from the first prompt by the
- * `session_progress` / `session_seen` reducers). It exists as a channel name
- * only so the precedence engine can take ONE uniform map and answer with the
- * channel that won, including when the winner is the fallback.
- *
- * ## Forward compatibility: unknown channels are DATA, not noise
- *
- * Because the channel set is open, an older reader will meet channels it has
- * never heard of. It must keep them. The failure mode otherwise is silent and
- * delayed: an old `rebuild` (or any load → save round-trip) drops the names it
- * does not recognise, no error is raised, and the loss only surfaces when
- * somebody notices a name they set is gone. So `isKnownChannel()` exists for
- * *display ordering only* and nothing in the write path may filter on it.
- *
- * What IS filtered is malformed input — `channel` / `source` are bounded in
- * length and restricted to an identifier charset so a name entry cannot become
- * a general-purpose payload smuggling lane, and `value` is length-capped so a
- * runaway writer cannot inflate the projection. Unknown ≠ invalid: the first
- * is preserved, the second is refused.
- *
- * This module is pure (no IO, no clock, no randomness).
- */
 /** Channels this version knows about by name. Open set — see module docs. */
 export const CHANNEL_ALIAS: "alias";
 export const CHANNEL_CC_CUSTOM_TITLE: "cc_custom_title";
@@ -310,6 +303,38 @@ export const MAX_NAME_VALUE_LEN: 512;
  * namer can never be starved by junk that arrived first.
  */
 export const MAX_CHANNELS_PER_SESSION: 32;
+/**
+ * Cap on `observed_from`. The module documents name entries as bounded; that
+ * claim did not cover this field, which holds a caller-supplied provenance
+ * string (a transcript path today, a tool name tomorrow). An event is refused
+ * outright above `MAX_EVENT_BYTES` (4 KiB), so an unbounded provenance string
+ * could fail the whole write — and the failure would be reported as an
+ * oversized event, never mentioning that a name was lost. Over-long
+ * provenance is dropped instead: the name is the payload, the path is the
+ * footnote.
+ *
+ * 512 covers a deep `~/.claude/projects/<workspace-hash>/<uuid>.jsonl` with
+ * room to spare (measured ~150 chars on the reference machine).
+ */
+export const MAX_OBSERVED_FROM_LEN: 512;
+/**
+ * Version of the name model as materialised into the projection.
+ *
+ * The projection is a cache, and a cache written by a build that did not have
+ * this model cannot be repaired in place: `set_count` and `observed_from` are
+ * folds of the event log, so a record materialised from the legacy top-level
+ * fields alone would claim one set for a channel the log says was set three
+ * times. Stamping the version lets `loadProjection` notice that the cache
+ * predates the model and rebuild it from the log — once, and then never
+ * again, because the rebuilt file carries the stamp.
+ *
+ * Bump this whenever a change makes previously-written `names[]` blocks
+ * wrong rather than merely older. The cost of a bump is one rebuild per
+ * database (18 ms over the 2018-event reference log), which is why it is
+ * preferable to shipping a schema whose derived fields quietly disagree with
+ * the log they came from.
+ */
+export const NAMES_MODEL_VERSION: 1;
 /**
  * Event ops that carry a name change. `alias_set` and `ai_title_seen` are the
  * pre-0.3.0 spellings; `name_set` is the general form every new write uses.

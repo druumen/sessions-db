@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -17,7 +17,13 @@ import {
   SOURCE_LLM,
   findNameEntry,
 } from '../../lib/names.mjs';
-import { loadProjection, newEvent, saveProjection, tryUpdateProjection } from '../../lib/storage.mjs';
+import {
+  appendEvent,
+  loadProjection,
+  newEvent,
+  saveProjection,
+  tryUpdateProjection,
+} from '../../lib/storage.mjs';
 
 const TS_A = '2026-08-01T10:00:00.000Z';
 const TS_B = '2026-08-02T10:00:00.000Z';
@@ -261,23 +267,129 @@ describe('projection.mjs — name model', () => {
   });
 
   describe('replay stability', () => {
+    const log = () => [
+      evt('ai_title_seen', TS_A, { ai_title: 'one', observed_at: TS_A }),
+      evt('name_set', TS_B, { channel: CHANNEL_CC_CUSTOM_TITLE, value: 'two', source: SOURCE_HUMAN }, 'b'),
+      evt('alias_set', TS_C, { alias: 'three' }, 'c'),
+    ];
+
+    it('applying every event a second time changes NOTHING', () => {
+      // The property that has to hold in production, and the one `set_count`
+      // used to break. `tryUpdateProjection` appends to the log before it
+      // folds, so whenever the cache is cold the fold already contains the
+      // event that is about to be applied again — one alias write on a root
+      // with no projection file used to land `set_count: 2`.
+      const once = emptyProjection();
+      const twice = emptyProjection();
+      for (const e of log()) {
+        applyEvent(once, e);
+        applyEvent(twice, e);
+        applyEvent(twice, e);
+      }
+      assert.deepEqual(
+        twice.sessions[SID].names,
+        once.sessions[SID].names,
+        'a repeated event must leave names[] byte-identical',
+      );
+      assert.equal(twice.sessions[SID].display_name, once.sessions[SID].display_name);
+    });
+
     it('folding the same log twice yields the same names block', () => {
-      const events = [
-        evt('ai_title_seen', TS_A, { ai_title: 'one', observed_at: TS_A }),
-        evt('name_set', TS_B, { channel: CHANNEL_CC_CUSTOM_TITLE, value: 'two', source: SOURCE_HUMAN }, 'b'),
-        evt('alias_set', TS_C, { alias: 'three' }, 'c'),
-      ];
+      const events = log();
       const once = rebuildFromEvents(events).sessions[SID];
       const twice = rebuildFromEvents([...events, ...events]).sessions[SID];
-      assert.deepEqual(
-        once.names.map((n) => ({ ...n, set_count: undefined })),
-        twice.names.map((n) => ({ ...n, set_count: undefined })),
-        'same values, same order',
-      );
+      // Every field now, `set_count` included. Each channel here is set once
+      // and never renamed, so a doubled log holds no new naming for any of
+      // them — which is precisely why the counter must not move.
+      assert.deepEqual(twice.names, once.names);
       assert.equal(once.display_name, twice.display_name);
-      // set_count is the one field that legitimately differs: it counts
-      // events, and replaying the log twice really is twice as many events.
-      assert.equal(twice.names[0].set_count, once.names[0].set_count * 2);
+    });
+
+    it('a doubled log DOES double the count for a channel that really was renamed', () => {
+      // The boundary of the guarantee above, asserted so it cannot be widened
+      // by accident. `A → B` concatenated with itself is the event sequence
+      // `A, B, A, B` — four namings, and no value-based reducer can tell that
+      // from a user who renamed back and forth. Only event identity could,
+      // and a set of applied event_ids in the projection is exactly the
+      // unbounded state the flat schema exists to avoid.
+      const renamed = [
+        evt('name_set', TS_A, { channel: CHANNEL_ALIAS, value: 'A', source: SOURCE_HUMAN }, 'a'),
+        evt('name_set', TS_B, { channel: CHANNEL_ALIAS, value: 'B', source: SOURCE_HUMAN }, 'b'),
+      ];
+      const once = rebuildFromEvents(renamed).sessions[SID];
+      const twice = rebuildFromEvents([...renamed, ...renamed]).sessions[SID];
+      assert.equal(once.names[0].set_count, 2);
+      assert.equal(twice.names[0].set_count, 4);
+      assert.equal(twice.names[0].value, 'B', 'the winner is still the last write');
+    });
+
+    it('re-asserting the value a channel already holds is not a rename', () => {
+      // The no-race, no-replay version: a user simply runs the same command
+      // twice. Two distinct events, same value — nothing about the session
+      // changed, so nothing about the record may change either.
+      const p = emptyProjection();
+      applyEvent(p, evt('name_set', TS_A, { channel: CHANNEL_ALIAS, value: 'pinned', source: SOURCE_HUMAN }, '1'));
+      const after1 = JSON.parse(JSON.stringify(p.sessions[SID].names));
+      applyEvent(p, evt('name_set', TS_B, { channel: CHANNEL_ALIAS, value: 'pinned', source: SOURCE_HUMAN }, '2'));
+      assert.deepEqual(p.sessions[SID].names, after1);
+      assert.equal(p.sessions[SID].names[0].set_count, 1);
+      assert.equal(p.sessions[SID].names[0].set_at, TS_A, 'set_at stays at the real set');
+    });
+
+    it('re-attribution IS a change — same string, different author', () => {
+      // `source` is part of the comparison on purpose: the same string
+      // attested by a person is a different fact from one a harvester
+      // scraped, and that distinction is the whole reason the axis exists.
+      const p = emptyProjection();
+      applyEvent(p, evt('name_set', TS_A, { channel: 'x_channel', value: 'same', source: SOURCE_HARVEST }, '1'));
+      applyEvent(p, evt('name_set', TS_B, { channel: 'x_channel', value: 'same', source: SOURCE_HUMAN }, '2'));
+      const entry = findNameEntry(p.sessions[SID], 'x_channel');
+      assert.equal(entry.set_count, 2);
+      assert.equal(entry.source, SOURCE_HUMAN);
+    });
+  });
+
+  describe('the projection cache is repaired when it predates the name model', () => {
+    it('recomputes set_count from the log instead of restarting the count', async () => {
+      // The in-place-upgrade case. A cache written before `names[]` existed
+      // carries the legacy mirrors only; when the next event lands, the
+      // reducer materialises the channel from scratch and would claim one
+      // set for a session the log says was named three times. Nothing would
+      // ever correct it — the derived refresh only runs on sessions that
+      // receive an event.
+      const root = mkTmp();
+      try {
+        const opts = { rootPath: root };
+        const events = [
+          evt('ai_title_seen', TS_A, { ai_title: 'first', observed_at: TS_A }, '1'),
+          evt('ai_title_seen', TS_B, { ai_title: 'second', observed_at: TS_B }, '2'),
+          evt('ai_title_seen', TS_C, { ai_title: 'third', observed_at: TS_C }, '3'),
+        ];
+        for (const e of events) await appendEvent(e, opts);
+
+        // A pre-name-model cache: legacy mirror only, no `names[]`, no stamp.
+        writeFileSync(join(root, 'sessions-db.json'), JSON.stringify({
+          _meta: {
+            schema_version: 2, fingerprint_versions: [], updated: TS_C,
+            event_count: 3, last_event_id: 'evt_test-3',
+          },
+          sessions: {
+            [SID]: { stable_id: SID, ai_title: 'third', alias: null, created_at: TS_A },
+            // A session the log says nothing about — must survive untouched.
+            sess_orphan: { stable_id: 'sess_orphan', alias: 'kept', created_at: TS_A },
+          },
+        }));
+
+        const loaded = await loadProjection(opts);
+        assert.equal(findNameEntry(loaded.sessions[SID], CHANNEL_CC_AI_TITLE).set_count, 3,
+          'the count comes from the log, not from "this is the first one I saw"');
+        assert.equal(loaded.sessions[SID].display_name, 'third');
+        assert.equal(loaded.sessions.sess_orphan.alias, 'kept',
+          'a session the log cannot speak for is left alone, never dropped');
+        assert.ok(loaded._meta.names_model_version >= 1, 'stamped so the repair is one-shot');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     });
   });
 });

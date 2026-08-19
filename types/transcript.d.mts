@@ -162,17 +162,30 @@ export function extractLatestAiTitle(path: string, opts?: {
  *   { "type": "custom-title", "customTitle": "...", "sessionId": "..." }
  *   { "type": "agent-name",   "agentName":   "...", "sessionId": "..." }
  *
- * `custom-title` is the one a human typed by hand — the strongest statement of
- * intent any of the naming surfaces produces — and nothing was collecting it.
+ * `custom-title` is USUALLY the one a human typed by hand — the strongest
+ * statement of intent any of the naming surfaces produces — and nothing was
+ * collecting it.
+ *
+ * "Usually" is doing real work there, and the record does not say which:
+ * Claude Code writes its own `custom-title` when a session is resumed from
+ * the picker (`Resume session <8 hex>`), in the same field, with nothing to
+ * distinguish it from a typed one. `isMachineGeneratedCustomTitle` below
+ * recognises that single known shape so the harvester can label it
+ * `harvest` instead of `human`; any OTHER machine-written title this
+ * surface grows in future will be indistinguishable and will be recorded as
+ * human authorship. That is a known limit of the `source` axis on this
+ * channel, not an oversight.
  *
  * ## Why one shared tail window is enough
  *
  * Same reasoning as `extractLatestAiTitle`, and measured rather than assumed.
- * On the reference machine's 353 transcripts: `custom-title` appears in 6
- * files and its last occurrence sits inside the 256 KiB tail in 6 of 6;
- * `agent-name` in 7 files, 7 of 7. All three kinds are re-emitted as the
- * session goes on (median 13 `custom-title` records per file that has any,
- * max 435), which is what keeps a recent copy inside the window.
+ * Measured 2026-08-19 across the reference machine's transcript corpus (4381
+ * files under `~/.claude/projects`; the corpus grows, the ratios are the
+ * claim): `custom-title` appears in 6 files and its last occurrence sits
+ * inside the 256 KiB tail in 6 of 6; `agent-name` in 8 files, 8 of 8. All
+ * three kinds are re-emitted as the session goes on (median 13
+ * `custom-title` records per file that has any, max 435), which is what keeps
+ * a recent copy inside the window.
  *
  * Scanning once for all three costs exactly what scanning once for one did —
  * the expensive part is the read, not the compare.
@@ -184,14 +197,32 @@ export function extractLatestAiTitle(path: string, opts?: {
  *   `null` when the file is missing or empty. Individual fields are null when
  *   the tail window holds no record of that kind.
  */
-export function extractLatestTitles(path: string, opts?: {
-    maxTailBytes?: number;
-}): {
-    aiTitle: string | null;
-    customTitle: string | null;
-    agentName: string | null;
-    sessionId: string | null;
-} | null;
+/**
+ * Does this `custom-title` look like the one Claude Code writes for itself?
+ *
+ * Resuming a session from the picker stores `Resume session <first 8 hex of
+ * the session id>` in the SAME field a person types into. On the reference
+ * corpus that shape accounts for 1 of the 6 distinct custom titles; the other
+ * 5 are real ("redesign BM overview", "定价分析", ...).
+ *
+ * Recognising it matters only for the `source` axis — precedence is per
+ * channel, so a demoted title still outranks an `ai_title`. What it buys is
+ * that "show me the names a HUMAN gave this session" does not answer with a
+ * string the machine wrote. The predicate is deliberately exact rather than
+ * fuzzy: a false positive silently downgrades a name somebody chose, which is
+ * the more expensive mistake, and "Resume session deadbeef" is not something
+ * a person types.
+ *
+ * @param {string} value
+ * @returns {boolean}
+ */
+export function isMachineGeneratedCustomTitle(value: string): boolean;
+export function extractLatestTitles(path: any, opts?: {}): {
+    aiTitle: any;
+    customTitle: any;
+    agentName: any;
+    sessionId: any;
+};
 /**
  * Maximum bytes scanned from the tail of a transcript when looking for the
  * latest `ai-title` record. Tuned at 256 KiB — large enough that any recent
