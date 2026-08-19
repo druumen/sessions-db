@@ -17,6 +17,14 @@
  * can fix it via `link-parent --remove`.
  */
 
+import {
+  CHANNEL_ALIAS,
+  CHANNEL_CC_AI_TITLE,
+  CHANNEL_CC_CUSTOM_TITLE,
+  CHANNEL_FIRST_PROMPT,
+  displayNameForSession,
+} from '../lib/names.mjs';
+
 const MAX_TREE_DEPTH = 32;
 
 // ANSI escape codes (zero-dep). Disabled when NO_COLOR is set or stdout is
@@ -97,11 +105,8 @@ export function formatSessionTable(sessions, opts = {}) {
   }
 
   const rows = sessions.map((s) => {
-    // "label" column display priority (added in 0.1.6):
-    //   alias  → user-set, highest priority
-    //   ai_title → harvested from Claude Code transcript; tagged [ai]
-    //   first_prompt_preview → first user message (truncated); tagged [preview]
-    //   '-' → none available
+    // "label" column — resolved through the shared display chain (see
+    // pickLabel); the order lives in lib/names.mjs, not here.
     const label = pickLabel(s);
     return {
       stable: truncateStableId(s.stable_id || ''),
@@ -172,36 +177,61 @@ const LABEL_MAX_LEN = 48;
 const PREVIEW_MAX_LEN = 60;
 
 /**
- * Pick which field to display in the `find` table's "label" column, with
- * source-aware truncation. The display priority is alias > ai_title >
- * first_prompt_preview > "-".
+ * Inline tag per label source. `alias` gets none — an operator-set name needs
+ * no explanation; everything else is machine-derived and says so.
+ */
+const LABEL_TAGS = Object.freeze({
+  custom_title: ' [custom]',
+  ai_title: ' [ai]',
+  preview: ' [preview]',
+  name: ' [name]',
+});
+
+/**
+ * Pick which name to display in the `find` table's "label" column, with
+ * source-aware truncation.
+ *
+ * The ORDER is not decided here. It comes from `resolveDisplayName`
+ * (lib/names.mjs), the one definition of the display chain — this function
+ * only maps the winning channel onto the table's inline tag vocabulary. Before
+ * 0.3.0 the chain was written out a second time right here, three levels deep
+ * where the shared one has four, and the missing level was `cc_custom_title`:
+ * the same session could be called one thing by `find` and another by the
+ * cockpit panel, and the difference was exactly the sessions a user had
+ * renamed by hand.
  *
  * Returns `{ text, source }` where source is one of:
- *   - 'alias'   — user-set label (no inline tag, the cleanest case)
- *   - 'ai_title' — AI-harvested title (rendered with `[ai]` suffix)
- *   - 'preview' — sanitized first prompt excerpt (rendered with `[preview]`
- *     suffix) — truncated to 60 chars to fit the table
- *   - 'none'    — nothing available; text is '-'
+ *   - 'alias'        — operator-set label (no inline tag, the cleanest case)
+ *   - 'custom_title' — renamed by hand in Claude Code (`[custom]` suffix)
+ *   - 'ai_title'     — model-generated title (`[ai]` suffix)
+ *   - 'preview'      — sanitized first prompt excerpt (`[preview]` suffix),
+ *     truncated harder because it is a sentence, not a name
+ *   - 'none'         — nothing available; text is '-'
  *
- * Exported so tests + future tooling (e.g. tree-view) can apply the same
- * "what should we call this session" priority without re-implementing it.
+ * The legacy source names are kept (rather than switching to raw channel ids)
+ * so the table's tags and every caller pinning them stay put.
  */
 export function pickLabel(session) {
   if (!session || typeof session !== 'object') return { text: '-', source: 'none' };
-  if (typeof session.alias === 'string' && session.alias.length > 0) {
-    return { text: truncateLabel(session.alias, LABEL_MAX_LEN), source: 'alias' };
-  }
-  if (typeof session.ai_title === 'string' && session.ai_title.length > 0) {
-    return { text: truncateLabel(session.ai_title, LABEL_MAX_LEN), source: 'ai_title' };
-  }
-  if (typeof session.first_prompt_preview === 'string' && session.first_prompt_preview.length > 0) {
-    return {
-      text: truncateLabel(session.first_prompt_preview, PREVIEW_MAX_LEN),
-      source: 'preview',
-    };
-  }
-  return { text: '-', source: 'none' };
+  const { display_name: name, display_name_channel: channel } = displayNameForSession(session);
+  if (name === null) return { text: '-', source: 'none' };
+  const source = LABEL_SOURCE_BY_CHANNEL[channel] ?? 'name';
+  const max = channel === CHANNEL_FIRST_PROMPT ? PREVIEW_MAX_LEN : LABEL_MAX_LEN;
+  return { text: truncateLabel(name, max), source };
 }
+
+/**
+ * Channel → the `find` table's source vocabulary. An unknown channel (one a
+ * newer writer introduced) falls back to the generic 'name' rather than being
+ * dropped — the label must render even when this build does not know the
+ * channel that produced it.
+ */
+const LABEL_SOURCE_BY_CHANNEL = Object.freeze({
+  [CHANNEL_ALIAS]: 'alias',
+  [CHANNEL_CC_CUSTOM_TITLE]: 'custom_title',
+  [CHANNEL_CC_AI_TITLE]: 'ai_title',
+  [CHANNEL_FIRST_PROMPT]: 'preview',
+});
 
 function truncateLabel(text, max) {
   // Collapse newlines so the label stays a single visual cell.
@@ -216,11 +246,7 @@ function truncateLabel(text, max) {
  * calculation is accurate.
  */
 function renderLabelCell(row, useColor) {
-  const tag = row.labelSource === 'ai_title'
-    ? ' [ai]'
-    : row.labelSource === 'preview'
-      ? ' [preview]'
-      : '';
+  const tag = LABEL_TAGS[row.labelSource] ?? '';
   if (!useColor || tag.length === 0) return row.label + tag;
   return row.label + paint(tag, ANSI.dim, true);
 }

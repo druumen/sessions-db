@@ -5,6 +5,328 @@ All notable changes to `@druumen/sessions-db` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-08-19
+
+Give a session all of its names, and give the names a history.
+
+Four parties name a Claude Code session and only two of them reached the
+database. The one carrying the strongest intent — `custom-title`, the name a
+person types by hand in Claude Code — had no field and no collector: cockpit
+read it off disk on every render and threw it away. And what *was* stored was
+stored flat, so every rename overwrote the previous name with no way to read it
+back. Measured on a 632-record reference database: 355 sessions carry a title,
+**51 of them were renamed at least once** by the model as the conversation
+drifted, and 406 rows recording those changes were sitting in `events.jsonl`
+with nothing able to read them.
+
+The failure that made it concrete: a session titled "Fix HTTP 400 error for
+oversized goal parameter" was later renamed to "Analyze Knowledge Spine". As of
+0.2.0, `search "Fix HTTP 400"` returned **nothing** — the current title was not
+indexed (only `alias` and the first prompt were), and the former one had no read
+path at all. The session existed, the data existed, and it was unfindable.
+
+### Added
+
+- **Name model (`lib/names.mjs`)** — one entry per **channel**, with
+  **authorship** kept as a separate axis:
+
+  | channel | who sets it | `source` | in the display chain |
+  |---|---|---|---|
+  | `alias` | `sessions-db alias` | `human` | yes — highest |
+  | `cc_custom_title` | Claude Code hand-rename | `human` | yes |
+  | `cc_ai_title` | Claude Code generated title | `llm` | yes |
+  | `agent_name` | agent-team badge | `harvest` | **no** |
+  | `first_prompt` | pseudo-channel for `first_prompt_preview` | — | yes — last |
+
+  `source` is not a synonym for channel: `cc_ai_title` and `cc_custom_title`
+  arrive through the same harvesting hook, but one was written by a model and
+  the other typed by a person — and "show me only the names a human gave this
+  session" is a question you cannot ask without that axis.
+
+  `agent_name` is recorded but deliberately kept out of the display chain:
+  measured, every session carrying that record had it byte-identical to its
+  `ai_title`. It is a badge, not a name — and because it is a mirror, `search`
+  reports one hit for the shared value rather than one per channel.
+
+  `cc_custom_title` is `human` with one documented exception: Claude Code
+  writes `Resume session <8 hex>` into that same field when a session is
+  resumed from the picker. That shape is recorded as `harvest`; any other
+  machine-written title on this channel would be indistinguishable from a typed
+  one.
+
+- **`name_set` event op** — the general form. `alias_set` and `ai_title_seen`
+  are still reduced, forever: the log is append-only, and those 406 existing
+  rows (with their `observed_at` and `source_transcript`) are exactly where the
+  name history starts. New writes emit only `name_set`.
+
+- **`sessions-db names <id>` (`--json`)** — every name a session has had, per
+  channel, with `set_at` / `source` / provenance, and each entry marked current
+  or superseded. It **replays the event log** rather than reading the
+  projection, because the projection deliberately does not have the answer.
+
+- **`search --include-history`** — opt-in matching against names a session no
+  longer has. Same cost shape as `--content`: the default path stays
+  projection-only. Hits report the channel and whether the match was the
+  current value or a former one (`name:<channel>` vs `name_history:<channel>`,
+  plus a structured `name_hits` array in `--json`).
+
+- **`setName()` library operation** — set or clear any channel. This is the
+  write path a consumer needs to push back a name it observed itself; until
+  something writes `cc_custom_title`, the database never learns the one name a
+  human actually typed.
+
+- **`extractLatestTitles()`** — one tail scan returns the most recent
+  `ai-title`, `custom-title` and `agent-name` record. Measured 2026-08-19
+  across the reference machine's transcript corpus (4381 files under
+  `~/.claude/projects`): the last `custom-title` is inside the 256 KiB tail
+  window in 6 of 6 files that have one, and `agent-name` in 8 of 8.
+
+### Changed
+
+- **`search` now indexes the current value of every naming channel.** The
+  biggest single gap it closes is `ai_title` — the name you actually see in
+  Claude Code, and previously the one thing metadata search did not cover (355
+  of 632 records). Works on projections that predate this release, via the
+  legacy fields.
+
+- **`SessionStart` now harvests all three naming records**, one `name_set` per
+  changed channel, with the same spam suppression as before (per channel).
+
+- **`sessions-db alias` feeds the `alias` channel** (source `human`) while
+  still writing the `alias_set` op. The reducer routes `alias_set` into the
+  channel model, so the model gains nothing from a new op — and keeping the old
+  one means a pre-0.3.0 reader can still fold an alias. `session.alias` and the
+  `ok: alias_set ...` stdout are unchanged.
+
+- **`find`'s label column resolves through the shared chain.** It previously
+  re-implemented a three-level version of it, missing `cc_custom_title` — so
+  `find` and the cockpit panel could display different names for the same
+  session, and the difference was precisely the sessions a user had renamed by
+  hand. A hand-rename now renders with a `[custom]` tag.
+
+- **`session.alias` / `session.ai_title` are now derived views** of the `alias`
+  / `cc_ai_title` channels. They are still written and still correct; nothing
+  that reads them needs to change. Removing them is a later migration, once
+  every consumer reads `names[]`.
+
+### Projection
+
+Three optional fields per session — `names[]`, `display_name`,
+`display_name_channel`. `schema_version` stays **2**: this release adds fields
+and an op, and removes or repurposes nothing.
+
+Two properties are load-bearing rather than incidental:
+
+- **The projection stores current values only** — one entry per channel plus a
+  `set_count`. History is unbounded by design and lives in `events.jsonl`;
+  inlining it here would make the file that every cockpit refresh reads whole
+  grow with every rename, turning a storage decision into a performance defect.
+  Verified on the reference database: 51 renames, still one entry per channel.
+- **A reader must preserve channels it does not recognise.** The channel set is
+  open so that adding a namer is a non-event; the price is that filtering
+  unknown channels would silently delete a newer version's names on the next
+  save — no error, and nobody notices until a name they set is gone. Channel and
+  source are bounded (1-64 / 1-32 chars of `[A-Za-z0-9._-]`, starting
+  alphanumeric) so an open field cannot become an arbitrary payload lane, and a
+  value is capped at 512 characters (the longest real title measured is 62).
+
+`display_name_channel` is not decoration. `alias` outranks a Claude Code
+rename — a deliberate choice, since it is the only channel a machine never
+rewrites — so it is possible to rename a session in Claude Code and see no
+change. The channel is what lets a UI say "showing the alias" rather than look
+broken.
+
+### Fixed
+
+Found by an independent review of this release before it shipped.
+
+- **`set_count` was a self-incrementing counter inside an event-sourced
+  reducer**, which the projection's own idempotency contract forbids. Every
+  other reducer is last-write-wins and therefore idempotent for free; this one
+  was not, and an append-only log means the wrong answer is permanent rather
+  than transient. Three ways it went wrong, all reproduced: running
+  `alias <id> "X"` twice with the same string (nothing detected the repeat) —
+  which made `names` report a superseded value that was in fact still current,
+  breaking the very invariant this release's own tests assert; a single write on
+  a root with no projection cache, because `tryUpdateProjection` appends to the
+  log first and then folds a log that already contains the event; and the
+  documented SessionStart race, whose "a duplicate costs log bytes, never
+  correctness" note was no longer true.
+
+  Fixed at the one place a name enters the model: a change whose
+  `(value, source)` already match the stored entry is a no-op, in the reducer
+  and in the history fold alike. Folding the reference log twice used to differ
+  on 355 sessions; applying every event twice now differs on none.
+
+- **`prune` deleted records whose only name came through a new channel.** Its
+  "no operator intent attached" criterion checked two fields (`alias`,
+  `ai_title`) while this release made the channel set open — so a session named
+  only through `cc_custom_title`, the surface this release itself calls the
+  strongest statement of intent any namer produces, was a ghost by every
+  enumerated criterion. The check is now channel-agnostic, and a cleared entry
+  counts as intent too.
+
+- **`types/index.d.cts` had none of the new type names**, so a `require()`
+  consumer — cockpit, named in that file's own header as the reason it exists —
+  could not import `NameChannel`, `NameSource`, `SessionName`,
+  `NameHistoryEntry` or `ResolvedDisplayName`. The file is hand-maintained
+  (tsc only emits `.d.mts` from `lib/`) and nothing had ever compiled it.
+  Added, plus a CJS types-smoke fixture that compiles against it and a check
+  that diffs the two barrels' export lists.
+
+- **`alias` no longer breaks backward compatibility for nothing.** Writing
+  `name_set` made aliases invisible to a pre-0.3.0 reducer — including when
+  `loadProjection` rebuilds on its own because the cache is missing or corrupt,
+  i.e. without anybody running `rebuild`. The reducer already routes
+  `alias_set` into the channel model, so the legacy op costs the new model
+  nothing and buys an older reader the one channel a human sets by hand.
+
+- **`set_at` accepted any non-empty string** while being typed `Iso8601|null`.
+  `setName({ observedAt: 'not-a-date' })` returned ok and stored it, and the
+  history view sorts on that field. `observedAt` is now validated on the write
+  path (rejected with a message) and on the read path (falls back to the event
+  ts rather than dropping the name).
+
+- **Name values reached the terminal unescaped.** A stored value containing an
+  ANSI escape, a NUL or a newline tore the `names` table apart or handed
+  control of the terminal to whatever wrote the transcript — and
+  `custom-title` is a free-text field a person types into. Values are now
+  sanitised on the way in and on the way out (`sanitizeNameValue`, exported):
+  escape sequences removed whole, control bytes folded to spaces so words do
+  not fuse, bidi overrides dropped, ZWJ and friends kept because emoji and
+  Indic scripts need them. The sanitiser is idempotent, which the reducer's
+  change detection depends on.
+
+  `first_prompt_preview` is cleaned for DISPLAY only — it is the last
+  resort of the display chain and holds raw user input, but
+  `first_human_prompt_v1` hashes the stored field, so rewriting it would
+  re-key every fingerprint on disk.
+
+- **`source` had three different defaults** across `setName`,
+  `nameSetPayload` and `nameChangeFromEvent`. They now all default to
+  `harvest`: the axis exists so a consumer can ask which names a *person* gave
+  a session, and a caller that did not say who authored one is by construction
+  reporting something it observed.
+
+- **`observed_from` was unbounded**, so the module's "bounded" claim did not
+  cover it and a long enough value could fail the whole write as an oversized
+  event — with an error that never mentioned a name. Capped at 512 characters
+  and sanitised; over-long provenance is dropped, the name is kept.
+
+- **An in-place upgrade left `set_count` and `observed_from` wrong** on every
+  existing installation, with nothing to trigger a repair: `schema_version`
+  stays 2 by design, and the derived-name refresh only runs on sessions that
+  receive an event, so one alias write materialised 1 of 632 records.
+  `_meta.names_model_version` now marks a cache as predating the model;
+  `loadProjection` recomputes the name blocks the log can speak for, leaves any
+  session it cannot speak for untouched, and stamps the result. One fold, once
+  per database.
+
+- **`names <id>` listed same-millisecond entries backwards** inside a
+  newest-first list — the normal case, since one harvest pass writes every
+  changed channel with a single `observedAt`.
+
+Found by a second independent review of the same release.
+
+- **The read-path sanitiser had a bypass, and it was the worst-case value that
+  took it.** A legacy `alias` / `ai_title` mirror is cleaned by nothing when
+  the projection is read, and the cleaning that happens on the way out of the
+  *event log* silently excludes exactly one class: a value that is nothing but
+  escape bytes cleans to empty, fails validation, and so never becomes a
+  `names[]` entry at all — at which point the channel reads as unset and the
+  display chain falls back to the raw mirror. `find` and `search` then printed
+  the original bytes to the terminal, and `names` said "No names have ever been
+  set" about the session it had just labelled `[via alias]`. Partial junk was
+  never affected (the cleaned entry exists and wins). The fallback is now
+  cleaned wherever it is read — display map, per-channel lookup, and the
+  metadata `search` indexes — with empty treated as "no name", so the chain
+  falls through instead of stopping on a label that renders as nothing.
+
+  The per-channel lookup mattered for a second reason: it is what the
+  harvester compares against to decide whether a name changed, and the value it
+  compares it to is already cleaned. A raw mirror could never match one, so the
+  duplicate suppression that fallback exists to provide would have inverted
+  into an event per SessionStart, forever.
+
+- **The name-model cache repair replaced a session's names wholesale.** It
+  overlaid rather than rebuilt — because a log can be rotated or retired — and
+  then discarded that same reasoning one level down: a session the surviving
+  log mentions through *one* channel had every *other* channel deleted, with no
+  event able to restore them, and the legacy `alias` / `ai_title` mirrors left
+  behind pointing at the old value. One record, two answers, depending on
+  whether the consumer read `display_name` or the mirror. The merge is now per
+  channel — the log wins where it speaks, the cache is kept where it does not —
+  and the mirrors are re-derived from the merged block. The remaining residual
+  is a `set_count` reflecting what a truncated log still holds, never a lost
+  name. No effect on the 0.3.0 upgrade itself: measured on the 635-session
+  reference database, the log covers every session, 0 channels were at risk.
+
+- **`_meta.event_count` was the same defect the `set_count` fix above was
+  about**, in the one field whose documented purpose is letting callers detect
+  drift — and it drifted. `tryUpdateProjection` appends to the log and then
+  folds, so on a cold cache the fold is a rebuild from a log that already
+  contains the event, which was then applied and counted a second time: a
+  3-event log reported 4, and every later cold write added another permanent
+  +1 that only `rebuild` could clear. The counter now deduplicates on event
+  IDENTITY (a fold of the id already in `last_event_id` is a replay, not a new
+  event) rather than on effect — a repeat that changes nothing is still a line
+  in the log, and skipping it would break the count in the other direction.
+
+- **The sanitiser's ordering invariant had no test, and the natural mutation
+  escaped all 718 of them.** Moving the space-collapse ahead of the
+  invisible-removal step passed the entire suite while breaking idempotency on
+  ~9% of a 300k-input fuzz (`a<space><ZWSP><space>b` comes out double-spaced),
+  which would have made every re-observation of such a name look like a rename.
+  The fixture list could not have caught it: the failing shape needs five parts
+  before it shows, and every fixture was shorter. Replaced by an enumerating
+  property test over one atom per hazard class, which kills that mutation.
+
+- **`alias` echoed the bytes it was handed, not the name it stored** — so a
+  successful write printed the escape sequence to the terminal the sanitiser
+  exists to protect, and reported a name (`clean<ESC>[31mRED`) the session is
+  not actually called (`cleanRED`). It now echoes the stored value.
+
+- **`alias --dry-run` previewed a write that cannot happen.** An alias made
+  entirely of escape sequences rendered `{"alias":""}` and exited 0, while the
+  real write refuses it outright. Both now answer to one validator.
+
+- **The harvester and the reducer disagreed about what a change is.** The
+  reducer counts `(value, source)` — the same string attested by a person is a
+  different fact from one a harvester scraped, which is the whole reason the
+  axis exists — while the hook's duplicate suppression compared the value
+  alone. A `custom-title` moving between `harvest` and `human` was therefore
+  swallowed, and the stale author label stayed on the record permanently. The
+  author is now compared too, except on records that have no `names[]` entry
+  and therefore no opinion about authorship (a pre-0.3.0 cache, which must not
+  look re-attributed).
+
+- **The two-barrel type manifest check read only the first `export type` block**
+  (`match`, not `matchAll`), so the day a barrel re-exports from a second module
+  the new names stop being compared — silently, for exactly the additions most
+  likely to drift. It now reads every block, in either formatting.
+
+### Known boundaries
+
+- `isSameNaming` compares by code units, not by Unicode equivalence: NFC `é`
+  and NFD `é` are visually identical and count as a rename. Left alone
+  deliberately — folding at the comparison would disagree with the value
+  actually stored, and folding on the write path re-keys an append-only log.
+  Documented in `lib/names.mjs`.
+
+### Compatibility
+
+- Rebuilding the full reference log (2018 events, 632 sessions) with this
+  reducer produces records **identical field for field** to the previous one,
+  with only the three new fields added.
+- Applying every one of those 2018 events **twice** changes nothing: 0 of 632
+  sessions differ, and `_meta` no longer differs either. Folding the whole log concatenated with itself moves
+  `set_count` on the 51 sessions that were genuinely renamed and on nothing
+  else — `A → B` doubled is the sequence `A, B, A, B`, which really is four
+  namings.
+- A pre-0.3.0 reducer treats `name_set` as an unknown op: not destructive, but
+  its projection will not reflect names a newer version wrote. Pin one version
+  per machine — see "Version skew" in the README.
+
 ## [0.2.0] — 2026-08-17
 
 Stop the database from filling with sessions nobody ever used, and start

@@ -1,0 +1,29 @@
+{
+  // CJS-context sibling of ./tsconfig.json.
+  //
+  // Same compiler settings, one different `paths` target: `types/index.d.cts`
+  // instead of `types/index.d.ts`. That is the file the package.json exports
+  // map hands a `require()` consumer, it is maintained BY HAND (tsc only
+  // emits `.d.mts` from `lib/`), and until this config existed nothing ever
+  // read it. It had drifted: the whole name-model type block was missing.
+  //
+  // `cockpit-require.cts` carries the `.cts` extension so TypeScript treats
+  // it as CommonJS despite the package's `"type": "module"` — that is what
+  // makes this exercise the `require` condition rather than a second copy of
+  // the ESM path.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@druumen/sessions-db": ["../../types/index.d.cts"]
+    }
+  },
+  "include": ["./cockpit-require.cts"]
+}

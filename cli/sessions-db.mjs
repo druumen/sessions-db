@@ -6,6 +6,7 @@
  *   find          filter sessions
  *   tree          render hub-spoke subtree
  *   alias         set / clear human alias
+ *   names         read every name a session has had (per channel + history)
  *   link          link to task / project (or --remove)
  *   link-parent   set / clear parent_session_id
  *   close         set outcome + closed_at + reason
@@ -39,6 +40,7 @@ const COMMANDS = {
   search: () => import('./search.mjs'),
   tree: () => import('./tree.mjs'),
   alias: () => import('./alias.mjs'),
+  names: () => import('./names.mjs'),
   link: () => import('./link.mjs'),
   'link-parent': () => import('./link-parent.mjs'),
   close: () => import('./close.mjs'),
@@ -56,6 +58,7 @@ function printRootHelp() {
     '  search        Free-text search sessions (metadata; --content scans transcript text)',
     '  tree          Render hub-spoke parent → children subtree',
     '  alias         Set / change / clear a session alias',
+  '  names         Show every name a session has had (per channel + history)',
     '  link          Link a session to a task or project (or --remove via session_unlink)',
     '  link-parent   Set / clear parent_session_id',
     '  close         Set outcome + closed_at + reason (or reopen)',

@@ -50,6 +50,12 @@ export type {
   IdentitySource,
   IdentityConfidence,
   EventOp,
+  // Names (0.3.0) — channel/source are open strings by contract, see lib/names.mjs
+  NameChannel,
+  NameSource,
+  SessionName,
+  NameHistoryEntry,
+  ResolvedDisplayName,
   // Composite shapes
   TranscriptFile,
   IdentityResolution,

@@ -276,3 +276,51 @@ describe('format.mjs', () => {
     });
   });
 });
+
+describe('format — pickLabel resolves through the shared display chain', () => {
+  it('shows a Claude Code hand-rename, which the old 3-level chain skipped', () => {
+    // The differential surface: `find` used to jump from alias straight to
+    // ai_title, so a session the user renamed by hand displayed as the model's
+    // title here and as the hand-typed one in cockpit.
+    const label = pickLabel({
+      names: [
+        { channel: 'cc_custom_title', value: 'flaky test hunt', set_at: 't', source: 'human' },
+        { channel: 'cc_ai_title', value: 'Investigate intermittent CI failure', set_at: 't', source: 'llm' },
+      ],
+    });
+    assert.deepEqual(label, { text: 'flaky test hunt', source: 'custom_title' });
+  });
+
+  it('still prefers the alias over everything, and tags nothing', () => {
+    const label = pickLabel({
+      alias: 'pinned',
+      names: [{ channel: 'cc_custom_title', value: 'renamed later', set_at: 't', source: 'human' }],
+    });
+    assert.deepEqual(label, { text: 'pinned', source: 'alias' });
+  });
+
+  it('renders a channel this build does not know rather than dropping it', () => {
+    const label = pickLabel({
+      names: [{ channel: 'from_the_future', value: 'a name', set_at: 't', source: 'plugin' }],
+    });
+    // Not in the display chain (only listed channels are), so it falls through
+    // to '-' — but a KNOWN-chain channel with an unknown source still renders.
+    assert.equal(label.source, 'none');
+    const withChain = pickLabel({
+      names: [{ channel: 'cc_ai_title', value: 'a name', set_at: 't', source: 'brand_new_source' }],
+    });
+    assert.deepEqual(withChain, { text: 'a name', source: 'ai_title' });
+  });
+
+  it('renders the [custom] tag in the table', () => {
+    const out = formatSessionTable([
+      {
+        stable_id: 'sess_aaaaaaaa-1111-7000-8000-000000000001',
+        names: [{ channel: 'cc_custom_title', value: 'hand typed', set_at: 't', source: 'human' }],
+        activity_state: 'active', outcome: 'open',
+        last_progress_at: '2026-08-01T00:00:00.000Z',
+      },
+    ], { now: Date.parse('2026-08-01T01:00:00.000Z') });
+    assert.match(out, /hand typed \[custom\]/);
+  });
+});

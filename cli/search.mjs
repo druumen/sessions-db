@@ -6,25 +6,41 @@
  * over Bash to locate the session that discussed/decided something, at minimal
  * context cost (no MCP schema tax). Two tiers:
  *
- *   - default      metadata only — substring match across alias / first prompt /
- *                  branch / cwd / task / project / ids. Fast (projection only).
- *   - --content    ALSO scan transcript message text (.jsonl) and return a
- *                  snippet. Slower (reads transcript files); --deep is an alias.
+ *   - default          metadata only — substring match across the CURRENT value
+ *                      of every naming channel plus first prompt / branch /
+ *                      cwd / task / project / ids. Fast (projection only).
+ *   - --include-history ALSO match names the session no longer has. Folds
+ *                      events.jsonl (the only place history lives).
+ *   - --content        ALSO scan transcript message text (.jsonl) and return a
+ *                      snippet. Slower (reads transcript files); --deep is an
+ *                      alias.
  *
- * A session matches if EITHER tier hits; `matched_in` reports which, and a
- * `snippet` is included for content hits.
+ * A session matches if ANY tier hits; `matched_in` reports which, `snippet` is
+ * included for content hits, and `name_hits` says for each matched name which
+ * channel it came from and whether it is the current value or a former one —
+ * without that, "search found it" cannot be told apart from "search found a
+ * name it used to have", which is exactly the question the history flag is
+ * there to answer.
  *
  * Output:
  *   - default: compact human list
- *   - --json:  array of { stable_id, alias, first_prompt_preview, activity_state,
- *              last_progress_at, claude_session_ids, matched_in, snippet }
+ *   - --json:  array of { stable_id, alias, display_name, display_name_channel,
+ *              first_prompt_preview, activity_state, last_progress_at,
+ *              claude_session_ids, matched_in, snippet, name_hits }
  */
 
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
-import { loadProjection } from '../lib/storage.mjs';
-import { matchSessionMetadata, recordText, extractSnippet } from '../lib/search.mjs';
+import { displayNameForSession, foldNameHistory } from '../lib/names.mjs';
+import { loadProjection, readAllEvents } from '../lib/storage.mjs';
+import {
+  extractSnippet,
+  matchCurrentNames,
+  matchNameHistory,
+  matchSessionMetadata,
+  recordText,
+} from '../lib/search.mjs';
 import {
   listTranscriptFiles,
   parseTranscriptFile,
@@ -40,6 +56,7 @@ const SPEC = {
   flags: {
     '--content': { type: 'boolean' },
     '--deep': { type: 'boolean' }, // alias for --content
+    '--include-history': { type: 'boolean' },
     '--state': { type: 'string' },
     '--limit': { type: 'number', default: 20 },
     '--max-file-mb': { type: 'number', default: 32 },
@@ -56,6 +73,7 @@ export const HELP = formatHelp({
   flags: [
     { name: '--content',       desc: 'also scan transcript message text + return a snippet (slow)' },
     { name: '--deep',          desc: 'alias for --content' },
+    { name: '--include-history', desc: 'also search names the sessions no longer have (folds the event log)' },
     { name: '--state <s>',     desc: 'restrict to active | idle | archived' },
     { name: '--limit <N>',     desc: 'cap result count (default 20)' },
     { name: '--max-file-mb <N>', desc: 'skip transcript files larger than N MB (default 32)' },
@@ -67,6 +85,7 @@ export const HELP = formatHelp({
     'sessions-db search "pricing overhaul" --json',
     'sessions-db search "RLS regression" --content --limit 5 --json',
     'sessions-db search bm-canvas --state active',
+    'sessions-db search "Fix HTTP 400" --include-history   # find it under a name it lost',
   ],
 });
 
@@ -253,14 +272,57 @@ export async function run(argv) {
   const state = parsed.flags['--state'];
   const limit = parsed.flags['--limit'] > 0 ? parsed.flags['--limit'] : 20;
   const wantContent = parsed.flags['--content'] === true || parsed.flags['--deep'] === true;
+  const wantHistory = parsed.flags['--include-history'] === true;
 
   const root = parsed.flags['--root'];
-  const projection = await loadProjection(root ? { root } : {});
+  const rootOpts = root ? { root } : {};
+  const projection = await loadProjection(rootOpts);
 
-  // Tier 1 — metadata. Build a map so the content pass can merge matched_in.
+  // Tier 1 — metadata (current names included). Build a map so the later
+  // passes can merge matched_in.
   const byId = new Map();
   for (const { session, matched_in } of searchByMetadata(projection, query, { state })) {
-    byId.set(session.stable_id, { session, matched_in: [...matched_in], snippet: null });
+    byId.set(session.stable_id, {
+      session,
+      matched_in: [...matched_in],
+      snippet: null,
+      name_hits: matchCurrentNames(session, query),
+    });
+  }
+
+  // Tier 2 — former names (opt-in). This is the only tier that reads the
+  // event log: the projection deliberately keeps just the current value per
+  // channel, so a name a session no longer has exists nowhere else. Sessions
+  // that matched nothing on tier 1 can enter the result set here — that is the
+  // whole point ("I remember it was called X, then it got renamed").
+  if (wantHistory) {
+    const { events } = readAllEvents(rootOpts);
+    const historyBySession = foldNameHistory(events);
+    const sessions = (projection && projection.sessions) || {};
+    for (const [stableId, byChannel] of historyBySession) {
+      const session = sessions[stableId];
+      // A session in the log but not in the projection was pruned or predates
+      // the cache; there is nothing to render for it.
+      if (!session) continue;
+      if (state && session.activity_state !== state) continue;
+      const hits = matchNameHistory(byChannel, query);
+      if (hits.length === 0) continue;
+      const existing = byId.get(stableId);
+      const labels = hits.map((h) => `name_history:${h.channel}`);
+      if (existing) {
+        for (const label of labels) {
+          if (!existing.matched_in.includes(label)) existing.matched_in.push(label);
+        }
+        existing.name_hits.push(...hits);
+      } else {
+        byId.set(stableId, {
+          session,
+          matched_in: [...new Set(labels)],
+          snippet: null,
+          name_hits: hits,
+        });
+      }
+    }
   }
 
   // Tier 2 — content (opt-in). Scans EVERY in-state session's transcripts,
@@ -281,7 +343,9 @@ export async function run(argv) {
         existing.matched_in.push(label);
         existing.snippet = hit.snippet;
       } else {
-        byId.set(s.stable_id, { session: s, matched_in: [label], snippet: hit.snippet });
+        byId.set(s.stable_id, {
+          session: s, matched_in: [label], snippet: hit.snippet, name_hits: [],
+        });
       }
     }
   }
@@ -293,16 +357,26 @@ export async function run(argv) {
   if (parsed.flags['--json']) {
     process.stdout.write(
       formatJSON(
-        results.map((r) => ({
+        results.map((r) => {
+          // Resolved rather than read off the record. A projection cache
+          // written before 0.3.0 has no display_name field, but it does have
+          // the legacy `alias` / `ai_title` mirrors — so computing gives the
+          // right answer on an old cache instead of a null for every row.
+          const display = displayNameForSession(r.session);
+          return {
           stable_id: r.session.stable_id,
           alias: r.session.alias ?? null,
+          display_name: display.display_name,
+          display_name_channel: display.display_name_channel,
           first_prompt_preview: r.session.first_prompt_preview ?? null,
           activity_state: r.session.activity_state ?? null,
           last_progress_at: r.session.last_progress_at ?? null,
           claude_session_ids: r.session.claude_session_ids ?? [],
           matched_in: r.matched_in,
           snippet: r.snippet,
-        })),
+          name_hits: r.name_hits ?? [],
+          };
+        }),
       ),
     );
     return;
@@ -316,7 +390,8 @@ function formatSearchList(results, { wantContent } = {}) {
   if (results.length === 0) {
     return wantContent
       ? 'No sessions matched (metadata + content).\n'
-      : 'No sessions matched metadata. Try --content to scan transcript text.\n';
+      : 'No sessions matched metadata. Try --include-history (former names) or '
+        + '--content (transcript text).\n';
   }
   const lines = [];
   for (const r of results) {
@@ -326,6 +401,16 @@ function formatSearchList(results, { wantContent } = {}) {
     const when = relTime(r.session.last_progress_at);
     lines.push(`${id}  ${state.padEnd(8)}  ${label}  (${when})`);
     lines.push(`    matched: ${r.matched_in.join(', ')}`);
+    // Spell out current-vs-former per matched name. A result whose only hit is
+    // a name the session lost looks identical to any other hit otherwise, and
+    // the user would have no way to see why the row does not contain the text
+    // they searched for.
+    for (const hit of r.name_hits ?? []) {
+      // The timestamp is when that value was SET, not when it stopped being
+      // current — the log records renames, not their expiry.
+      const when = hit.set_at ? `, set ${hit.set_at}` : '';
+      lines.push(`    name [${hit.kind}] ${hit.channel}${when}: ${hit.value}`);
+    }
     if (r.snippet) lines.push(`    … ${r.snippet}`);
   }
   return lines.join('\n') + '\n';

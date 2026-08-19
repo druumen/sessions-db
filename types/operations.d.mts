@@ -28,6 +28,98 @@ export function setAlias(opts: {
     error?: string;
 }>;
 /**
+ * Validate and clean one alias value — the single rule both the write path
+ * and `cli/alias.mjs --dry-run` answer to.
+ *
+ * Extracted because the dry run had been reimplementing half of it: it
+ * sanitised (so the preview showed the right bytes) but did not re-check the
+ * result, so an alias that is nothing but escape sequences previewed as
+ * `{"alias":""}` — an event the real write refuses outright. A dry run that
+ * describes a write that cannot happen is worse than no dry run, and the only
+ * durable fix is for there to be one rule rather than two that agree today.
+ *
+ * Sanitising before the length check is deliberate: the cap has to apply to
+ * what is actually stored, and an all-escape value has to fail with a reason
+ * rather than be written as an empty name.
+ *
+ * Errors are worded as user-facing sentences with no caller prefix, so
+ * `setAlias` can prefix them for the library surface while the CLI prints
+ * them as-is.
+ *
+ * @param {unknown} alias
+ * @returns {{ ok: true, value: string } | { ok: false, error: string }}
+ */
+export function normalizeAliasValue(alias: unknown): {
+    ok: true;
+    value: string;
+} | {
+    ok: false;
+    error: string;
+};
+/**
+ * Canonical payload for an alias write. Shared with `cli/alias.mjs --dry-run`
+ * so the preview and the write cannot diverge.
+ *
+ * The `alias_set` shape (`{ alias }`), not `{ channel, value, source }` —
+ * see `setAlias` for why the legacy op is still the one being written. The
+ * channel, the `human` source and the display precedence are all derived
+ * from the op by `nameChangeFromEvent`, so nothing is lost by not spelling
+ * them out.
+ *
+ * @param {string|null} value already sanitised by the caller
+ */
+export function aliasSetPayload(value: string | null): {
+    alias: string;
+};
+/**
+ * Set or clear a name on any channel.
+ *
+ * The general form behind `setAlias`, and the write path a consumer needs in
+ * order to push back a name it observed itself — cockpit reads Claude Code's
+ * `custom-title` off disk on every render, and until something writes it, the
+ * database never learns the one name a human actually typed.
+ *
+ * `channel` and `source` are open strings: this function validates that they
+ * are well-formed (length + identifier charset), never that they are already
+ * known. Refusing an unknown channel here would defeat the point of an open
+ * set — a new namer is supposed to be a non-event.
+ *
+ * `value: null` (or `clear: true`) records a deliberate clear. It is a
+ * history entry, not a deletion: "somebody removed this name" is itself
+ * information, and a delete would make it indistinguishable from
+ * "never named".
+ *
+ * @param {{
+ *   stableId: string,
+ *   channel: string,
+ *   value?: string|null,
+ *   clear?: boolean,
+ *   source?: string,
+ *   observedFrom?: string,
+ *   observedAt?: string,
+ *   rootPath?: string,
+ *   root?: string,
+ *   paths?: object,
+ * }} opts
+ * @returns {Promise<{ ok: boolean, event_id?: string, error?: string }>}
+ */
+export function setName(opts: {
+    stableId: string;
+    channel: string;
+    value?: string | null;
+    clear?: boolean;
+    source?: string;
+    observedFrom?: string;
+    observedAt?: string;
+    rootPath?: string;
+    root?: string;
+    paths?: object;
+}): Promise<{
+    ok: boolean;
+    event_id?: string;
+    error?: string;
+}>;
+/**
  * Link a session to one or more tasks / projects (additive, idempotent).
  *
  * At least one of `tasks` / `projects` must be a non-empty array. The

@@ -1,13 +1,14 @@
 export { initProjection } from "./init.mjs";
 export { watchProjection } from "./watch.mjs";
 export { loadProjection, rebuildProjection, recordSessionSeen, tryUpdateProjection, newEvent, appendEvent, readAllEvents, saveProjection, storageDir, lockPathFor, PATHS, MAX_EVENT_BYTES } from "./storage.mjs";
-export { setAlias, linkTask, unlinkTask, setParent, closeSession, runSweep } from "./operations.mjs";
+export { setAlias, setName, aliasSetPayload, linkTask, unlinkTask, setParent, closeSession, runSweep } from "./operations.mjs";
+export { resolveDisplayName, displayNameForSession, nameValuesFromSession, NAME_PRECEDENCE, CHANNEL_ALIAS, CHANNEL_CC_CUSTOM_TITLE, CHANNEL_CC_AI_TITLE, CHANNEL_AGENT_NAME, CHANNEL_FIRST_PROMPT, KNOWN_CHANNELS, SOURCE_HUMAN, SOURCE_LLM, SOURCE_HARVEST, isValidChannel, isValidSource, isValidNameValue, isIso8601, isKnownChannel, normalizeObservedFrom, findNameEntry, currentNameValue, hasAnyName, isSameNaming, foldNameHistory, splitChannelHistory, sortChannels, nameChangeFromEvent, nameSetPayload, NAME_BEARING_OPS, MAX_CHANNEL_LEN, MAX_SOURCE_LEN, MAX_NAME_VALUE_LEN, MAX_CHANNELS_PER_SESSION, MAX_OBSERVED_FROM_LEN, NAMES_MODEL_VERSION } from "./names.mjs";
 export { resolveStoragePaths, pathsFromRoot, STORAGE_FILENAMES, MAX_ASCEND_DEPTH } from "./paths.mjs";
 export { resolveIdentity, findByClaudeSessionId, findByTranscriptLineage, scanFingerprintCandidates, collectParentCandidates, capParentCandidates, classifyCorroborators, meetsThreshold, MAX_PARENT_CANDIDATES, STRONG_CORROBORATORS, WEAK_CORROBORATORS } from "./identity.mjs";
 export { computeSweepTransitions, computeEffectiveLastProgress } from "./sweep.mjs";
 export { runPrune, computePruneCandidates, hasTranscriptOnDisk, assessScanTrust, parseDuration, DEFAULT_OLDER_THAN_MS } from "./prune.mjs";
 export { pendingDir, pendingPath, writePending, readPending, deletePending, listPending, sweepPending, markPromoterAlive, isPromoterAlive, PENDING_DIRNAME, PENDING_MAX_AGE_MS, PROMOTER_MARKER, PROMOTER_MAX_AGE_MS, PROMOTER_STALE_AFTER_MS, PROMOTER_BACKLOG_MIN_COUNT, PROMOTER_BACKLOG_MIN_AGE_MS } from "./pending.mjs";
-export { workspaceHashFromCwd, listTranscriptFiles, findTranscriptByCsid, indexTranscriptCsids } from "./transcript.mjs";
-export { sanitizeFirstPrompt, stripIdeWrappers, stripSystemReminders } from "./sanitize.mjs";
+export { workspaceHashFromCwd, listTranscriptFiles, findTranscriptByCsid, indexTranscriptCsids, extractLatestTitles } from "./transcript.mjs";
+export { sanitizeFirstPrompt, sanitizeNameValue, stripIdeWrappers, stripSystemReminders } from "./sanitize.mjs";
 export { generateSessionId, isSessionId, extractTimestamp } from "./uuid.mjs";
 export { applyEvent, emptyProjection, emptySession, rebuildFromEvents } from "./projection.mjs";

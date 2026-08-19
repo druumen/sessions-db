@@ -123,11 +123,22 @@ describe('alias handler', () => {
       plantProjection(root, [mkSession(SID_A)]);
       const r = await runHandler(aliasMod, [SID_A, 'demo-alias', '--root', root]);
       assert.equal(r.exitCode, 0, r.stderr);
+      // 0.3.0: the alias became one channel of the name model, but the wire
+      // op stays `alias_set` — the reducer feeds it into the channel model
+      // anyway, and keeping the old op is what lets an older reader on the
+      // same machine still fold an alias a human set.
       assert.match(r.stdout, /ok: alias_set/);
       const proj = await loadProjection({ root });
       assert.equal(proj.sessions[SID_A].alias, 'demo-alias');
+      assert.deepEqual(
+        proj.sessions[SID_A].names.map((n) => [n.channel, n.value, n.source]),
+        [['alias', 'demo-alias', 'human']],
+      );
+      assert.equal(proj.sessions[SID_A].display_name, 'demo-alias');
+      assert.equal(proj.sessions[SID_A].display_name_channel, 'alias');
       assert.equal(eventsLines(root).length, 1);
       assert.equal(eventsLines(root)[0].op, 'alias_set');
+      assert.deepEqual(eventsLines(root)[0].payload, { alias: 'demo-alias' });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -160,6 +171,45 @@ describe('alias handler', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('echoes the value it stored, not the bytes it was handed', async () => {
+    // The echo used to print the raw argument. That put the escape sequence
+    // straight onto the terminal the sanitiser exists to protect, and named a
+    // session something other than what it is now called.
+    const root = mkTmp();
+    try {
+      plantProjection(root, [mkSession(SID_A)]);
+      const r = await runHandler(aliasMod, [SID_A, 'clean\x1b[31mRED', '--root', root]);
+      assert.equal(r.exitCode, 0, r.stderr);
+      assert.match(r.stdout, /alias: cleanRED/);
+      assert.ok(!r.stdout.includes('\x1b['), 'no escape sequence reaches stdout');
+      const proj = await loadProjection({ root });
+      assert.equal(proj.sessions[SID_A].alias, 'cleanRED', 'and it matches what was stored');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('--dry-run refuses exactly what the write refuses', async () => {
+    // An alias that is nothing but escape sequences is rejected by the write
+    // path (exit 1). The preview used to render `{"alias":""}` and exit 0 —
+    // describing an event that cannot be written, which is the one thing a
+    // dry run must never do.
+    const root = mkTmp();
+    try {
+      plantProjection(root, [mkSession(SID_A)]);
+      const dry = await runHandler(aliasMod, [SID_A, '\x1b[31m\x1b[0m', '--dry-run', '--root', root]);
+      const real = await runHandler(aliasMod, [SID_A, '\x1b[31m\x1b[0m', '--root', root]);
+      assert.equal(dry.exitCode, 1, `dry run should refuse; stdout=${dry.stdout}`);
+      assert.equal(real.exitCode, 1);
+      assert.match(dry.stderr, /printable/);
+      assert.ok(!dry.stdout.includes('dry-run'), 'nothing is previewed');
+      assert.equal(eventsLines(root).length, 0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
 
   it('exits 1 on unknown stable_id', async () => {
     const root = mkTmp();

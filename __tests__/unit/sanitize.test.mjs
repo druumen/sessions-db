@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   sanitizeFirstPrompt,
+  sanitizeNameValue,
   stripIdeWrappers,
   stripSystemReminders,
 } from '../../lib/sanitize.mjs';
@@ -318,5 +319,128 @@ describe('sanitize.mjs', () => {
         '<system>S</system><thinking>T</thinking><tool_use>U</tool_use><tool_result>R</tool_result><parameter>P</parameter>real';
       assert.equal(sanitizeFirstPrompt(input), 'real');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sanitizeNameValue
+// ---------------------------------------------------------------------------
+
+describe('sanitize — sanitizeNameValue', () => {
+  it('strips whole ANSI sequences rather than just the ESC byte', () => {
+    // Removing ESC alone would leave `[31m` as visible text: the name changes
+    // AND the junk still shows. Whole-sequence removal is the only version
+    // that is both safe and non-destructive.
+    assert.equal(sanitizeNameValue('\x1b[31mred\x1b[0m'), 'red');
+    assert.equal(sanitizeNameValue('\x1b[2K'), '', 'erase-line is the whole value');
+    assert.equal(sanitizeNameValue('a\x1b]0;retitled\x07b'), 'ab', 'OSC window-title');
+  });
+
+  it('turns control bytes into spaces instead of deleting them', () => {
+    // A name that silently fuses two words is a name nobody can search for
+    // afterwards, so a newline has to stay a word boundary.
+    assert.equal(sanitizeNameValue('fix\nthe test'), 'fix the test');
+    assert.equal(sanitizeNameValue('tab\there'), 'tab here');
+    assert.equal(sanitizeNameValue('nul\x00byte'), 'nul byte');
+    assert.equal(sanitizeNameValue('a\u2028b'), 'a b', 'U+2028 breaks a line like LF does');
+  });
+
+  it('drops bidi overrides, which change how the rest of the line renders', () => {
+    assert.equal(sanitizeNameValue('safe\u202ederevo'), 'safederevo');
+    assert.equal(sanitizeNameValue('a\u200bb'), 'ab', 'zero-width space');
+  });
+
+  it('keeps the invisibles that carry meaning', () => {
+    // ZWJ is load-bearing inside emoji sequences and Indic scripts; stripping
+    // it would corrupt real names to defend against nothing.
+    const family = 'family \u{1F468}\u200d\u{1F469}\u200d\u{1F467}';
+    assert.equal(sanitizeNameValue(family), family);
+    assert.equal(sanitizeNameValue('naïve café 定价分析'), 'naïve café 定价分析');
+  });
+
+  it('is idempotent for every shape it handles', () => {
+    // Load-bearing, not tidiness: the name reducer decides "did anything
+    // change?" by comparing a stored value against an incoming one, so a
+    // sanitiser that kept nibbling would make every re-observation look like
+    // a rename and put the set_count bug back.
+    for (const raw of [
+      'plain', '', '   ', 'a\nb', '\x1b[31mx\x1b[0m', 'a  b', '\u202ex',
+      'a\x00\x00b', '  padded  ', 'tab\t\tgap', 'mixed \x1b[1m\nvalue',
+      // An invisible BETWEEN spaces — the shape this fixture list was missing,
+      // and the only one that distinguishes the real ordering from the
+      // plausible-looking wrong one. See the property test below.
+      'a \u200b b', 'a\u200b b', 'a \ufeffb',
+    ]) {
+      const once = sanitizeNameValue(raw);
+      assert.equal(sanitizeNameValue(once), once, `not idempotent for ${JSON.stringify(raw)}`);
+    }
+  });
+
+  it('holds its ordering invariants across every short mix of hazards', () => {
+    // A fixture list can only assert the shapes somebody thought of, and the
+    // one it did not think of was "an invisible sits between two spaces" —
+    // which is exactly where the pipeline order is load-bearing. Removing
+    // invisibles BEFORE collapsing spaces turns `a<space><ZWSP><space>b` into
+    // `a b`; collapsing first leaves the double space the removal then
+    // creates, so `sanitize(sanitize(x)) !== sanitize(x)` and the name reducer
+    // starts reading a re-observation as a rename.
+    //
+    // So this enumerates rather than lists. Note the depth: that shape needs
+    // FIVE atoms (anchor, space, invisible, space, anchor) because a run at
+    // either end is eaten by the trim instead — a 4-deep sweep passes the
+    // broken order happily, which is the same blind spot as the fixture list
+    // one level up. Deterministic, no seed, ~180k inputs, ~0.3 s.
+    const ATOMS = [
+      'a',            // ordinary text
+      ' ',            // the character everything else collapses into
+      '\u200b',       // zero-width space   — invisible, removed
+      '\ufeff',       // BOM as ZWNBSP      — invisible, removed
+      '\u202e',       // RTL override       — invisible, removed
+      '\u200d',       // ZWJ                — invisible, DELIBERATELY kept
+      '\n',           // control            — folded to a space
+      '\x00',         // control            — folded to a space
+      '\x1b',         // a bare ESC with no sequence behind it
+      '\x1b[31m',     // complete CSI
+      '\x1b]0;t\x07', // complete OSC
+    ];
+    // The classes that can produce or absorb a space, swept deeper: a variant
+    // of the ordering bug that needs more room to show itself lives here and
+    // costs almost nothing to look for.
+    const SPACING_ATOMS = ['a', ' ', '\u200b', '\n'];
+
+    const check = (raw) => {
+      const once = sanitizeNameValue(raw);
+      const shown = JSON.stringify(raw);
+      // (1) The contract the reducer depends on.
+      assert.equal(sanitizeNameValue(once), once, `not idempotent for ${shown}`);
+      // (2) and (3) are how (1) is achieved rather than separate wishes:
+      // nothing may leave a space run or an edge space behind, because a
+      // second pass would then have work to do.
+      assert.ok(!once.includes('  '), `double space left in ${shown} -> ${JSON.stringify(once)}`);
+      assert.equal(once, once.trim(), `edge whitespace left in ${shown}`);
+    };
+
+    let checked = 0;
+    const sweep = (atoms, maxLen) => {
+      const walk = (prefix, depth) => {
+        if (depth === 0) { check(prefix); checked++; return; }
+        for (const atom of atoms) walk(prefix + atom, depth - 1);
+      };
+      for (let len = 1; len <= maxLen; len++) walk('', len);
+    };
+    sweep(ATOMS, 5);
+    sweep(SPACING_ATOMS, 8);
+    assert.ok(checked > 100_000, `expected the full product to be walked, got ${checked}`);
+  });
+
+  it('collapses only the space runs it could have created', () => {
+    assert.equal(sanitizeNameValue('  spaced   out  '), 'spaced out');
+    assert.equal(sanitizeNameValue('a\x00\x00\x00b'), 'a b');
+  });
+
+  it('answers empty string for non-strings', () => {
+    assert.equal(sanitizeNameValue(null), '');
+    assert.equal(sanitizeNameValue(undefined), '');
+    assert.equal(sanitizeNameValue(42), '');
   });
 });

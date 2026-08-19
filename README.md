@@ -90,7 +90,9 @@ sessions-db find --limit 10                   # list recent sessions (structured
 sessions-db search "pricing" --json           # free-text search (metadata; AI-friendly)
 sessions-db search "RLS regression" --content # also scan transcript text + snippet
 sessions-db tree sess_019e0f2d-c6e3...        # ancestry / descendants
-sessions-db alias sess_019e0f2d-c6e3 "label"  # human-readable alias
+sessions-db alias sess_019e0f2d-c6e3 "label"  # human-readable alias (alias channel)
+sessions-db names sess_019e0f2d-c6e3          # every name it has had, per channel
+sessions-db search "old name" --include-history  # find it under a name it lost
 sessions-db link sess_xxx --task feat-foo.md  # link to ticket / project
 sessions-db link-parent sess_child sess_parent
 sessions-db close sess_xxx --outcome done --reason "shipped"
@@ -273,9 +275,126 @@ truth; the projection (`sessions-db.json`) is a derivable cache. Run
 `sessions-db rebuild` at any time to regenerate the projection from
 events — useful after manual events-log inspection / surgery.
 
-`schema_version: 2` is still the contract in 0.2.0 — the release adds
-event ops (`session_progress`, `session_prune`) and honours a new
-optional `created_at` payload field, but removes and repurposes nothing.
+`schema_version: 2` is still the contract in 0.3.0 — every release so far
+has added event ops (`session_progress`, `session_prune`, `name_set`) and
+optional projection fields, and removed or repurposed nothing.
+
+### Session names
+
+A session is named by several parties, and each one is a **channel**:
+
+| channel | who sets it | `source` | in the display chain |
+|---|---|---|---|
+| `alias` | `sessions-db alias` (you) | `human` | yes — highest |
+| `cc_custom_title` | renamed by hand in Claude Code | `human` ¹ | yes |
+| `cc_ai_title` | Claude Code's generated title | `llm` | yes |
+| `agent_name` | agent-team badge | `harvest` | **no** — recorded only |
+| `first_prompt` | pseudo-channel for `first_prompt_preview` | — | yes — last resort |
+
+`source` is **authorship**, not the collection route: `cc_ai_title` and
+`cc_custom_title` both arrive through the same harvesting hook, but one
+was written by a model and the other typed by a person.
+
+¹ Claude Code also writes `custom-title` itself when a session is resumed
+from the picker (`Resume session <8 hex>`), into the same field a person
+types into. That one known shape is recorded as `harvest`; any other
+machine-written title on this channel would be indistinguishable from a
+typed one and would be recorded as `human`. Known limit of the axis on
+this channel.
+
+Three properties are worth knowing before you build on this:
+
+- **The channel list is open.** New namers are added by writing a new
+  channel string; nothing enumerates them. The price is a rule every
+  reader must honour: **preserve channels you do not recognise**. A
+  reader that filtered them would silently delete a newer version's names
+  on its next save. Channel and source are bounded (1-64 / 1-32 chars of
+  `[A-Za-z0-9._-]`, starting alphanumeric) so an open field cannot become
+  an arbitrary payload lane.
+- **The projection stores current values only.** One entry per channel,
+  plus a `set_count`. History lives in `events.jsonl` and is read back by
+  `sessions-db names <id>`, which replays it. Renaming a session 500
+  times does not grow the projection, which matters because that file is
+  read whole on every refresh.
+- **Naming a channel what it is already called is not a rename.** Two
+  writes of the same `(value, source)` leave the entry untouched —
+  `set_count` does not move and no history entry appears. This is what
+  keeps the reducer idempotent: the projection is a fold of an append-only
+  log, so the same event legitimately arrives twice (a cold cache is
+  rebuilt from a log that already holds it, two hooks race the same
+  observation, you run `alias` twice). A counter that moved on a repeat
+  could not be corrected afterwards — the duplicate is in the log forever,
+  so `rebuild` would reproduce the wrong answer.
+- **Values are sanitised.** Control bytes, ANSI escape sequences, newlines
+  and bidi overrides are stripped or folded to spaces on the way in and on
+  the way out. Names are printed to a terminal unescaped by `names`,
+  `find` and `search`, and `custom-title` is a free-text field somebody
+  types into. "On the way out" includes the legacy top-level `alias` /
+  `ai_title` mirrors, which pre-date the sanitiser and are the values a
+  record written by an older build still displays from.
+- **`display_name_channel` explains `display_name`.** `alias` outranks a
+  Claude Code rename, so it is possible to rename a session in Claude
+  Code and see no change. Surface the channel and the UI can say
+  "showing the alias" instead of looking broken.
+
+The precedence chain is defined once, in `lib/names.mjs`, and exported as
+`resolveDisplayName`. It takes a `{ channel: value }` map rather than a
+session record on purpose: this database is authoritative for name
+**history**, but the Claude Code transcript is authoritative for the
+**current** value of its own channels (the copy here only refreshes on
+`SessionStart`). A consumer holding a fresher observation overrides that
+one channel and still gets the shared rule:
+
+```js
+import { resolveDisplayName, nameValuesFromSession } from '@druumen/sessions-db';
+
+resolveDisplayName({
+  ...nameValuesFromSession(session),
+  cc_custom_title: freshlyReadFromTranscript,   // yours wins, rule is still ours
+});
+```
+
+`session.alias` and `session.ai_title` remain as derived views of the
+`alias` / `cc_ai_title` channels, so existing consumers are unaffected.
+
+### Upgrading to 0.3.0: the projection repairs itself once
+
+`names[].set_count` and `names[].observed_from` are folds of the event
+log, so a projection cache written by an older build carries values the
+log disagrees with — and nothing in normal operation would ever correct
+them, because the derived-name refresh only touches sessions that receive
+a new event.
+
+`_meta.names_model_version` closes that: the first `loadProjection` on a
+cache without the stamp recomputes every name block the log can speak for,
+leaves any session the log cannot speak for exactly as it was, and stamps
+the result. One fold, once per database (18 ms over a 2018-event log), and
+every later load takes the fast path. No manual `rebuild` needed; running
+one is harmless.
+
+`schema_version` deliberately stays `2` — the record shape did not change
+and the typed contract pins it — which is why this needed its own marker.
+
+### Version skew: an old reader IGNORES `name_set`
+
+A pre-0.3.0 reducer treats `name_set` as an unknown op — a no-op that
+still counts toward `event_count`. It is not destructive (nothing is
+deleted, and `events.jsonl` keeps every row), but while that reader is in
+charge the projection will not reflect names written by a newer one:
+`sessions-db names` on a channel other than `alias` writes `name_set`, and
+a 0.2.0 `rebuild` will not see it.
+
+`alias` is the exception, on purpose. It keeps writing the legacy
+`alias_set` op even though `name_set` is the general form, because the
+reducer feeds `alias_set` into the channel model anyway — so the new model
+loses nothing — while an older reader can still fold it. That matters more
+here than anywhere else: `loadProjection` rebuilds from the log whenever
+the cache is missing or corrupt, so an older binary on the same machine
+drops names *without anybody asking it to rebuild*, and `alias` is the one
+channel a human sets by hand.
+
+The rule is still the same as below — pin one version per machine rather
+than mixing.
 
 ### Version skew: an old reader RESURRECTS pruned records
 
@@ -307,7 +426,7 @@ but nothing gates on it, and it stays `2` either way. So:
   clear the criteria again.
 - `schema_version` was deliberately **not** bumped for this: nothing in
   any shipped reader compares it, so a bump would break the typed
-  `schema_version: 2` contract and the documented 0.4.0 migration plan
+  `schema_version: 2` contract and the documented 0.5.0 migration plan
   while changing no behaviour. Documenting the skew is the honest fix.
 
 The pending area (`sessions-db-pending/`) is deliberately NOT part of the
@@ -342,12 +461,16 @@ Apache 2.0 — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
   cross-platform (macOS / Linux verified in CI; Windows pending runner) +
   privacy opt-out (`storeFirstPrompt: false` /
   `DRUUMEN_SESSIONS_DB_STORE_PREVIEW=0`) + free-text `search`.
-- **0.2.0** (current): `UserPromptSubmit` hook (real first-prompt preview,
+- **0.2.0**: `UserPromptSubmit` hook (real first-prompt preview,
   live progress timestamps, branch drift), deferral of never-used sessions
   so ghosts are not created, and `prune` to clear historical ones.
-- **0.3.0** (TBD): parent_candidate auto-promote heuristic, outcome
+- **0.3.0** (current): the session **name model** — every naming channel
+  recorded with its authorship and history, `sessions-db names <id>`,
+  name-aware `search` (`--include-history`), and one shared precedence
+  chain for every consumer.
+- **0.4.0** (TBD): parent_candidate auto-promote heuristic, outcome
   auto-derive on `/task-done` linkage.
-- **0.4.0** (TBD): Multi-machine sync (schema_version=3 break,
+- **0.5.0** (TBD): Multi-machine sync (schema_version=3 break,
   documented migration).
-- **0.4.0+** (TBD): Web UI / VS Code Sessions panel via
+- **0.5.0+** (TBD): Web UI / VS Code Sessions panel via
   [Druumen Cockpit](https://druumen.com).

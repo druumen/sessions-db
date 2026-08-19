@@ -199,6 +199,8 @@ describe('sessions-db CLI — full lifecycle integration (spawn)', () => {
       }, {});
       assert.equal(opCounts.session_seen, 2);
       assert.equal(opCounts.alias_set, 1);
+      assert.equal(opCounts.name_set, undefined,
+        'alias keeps its own op so a 0.2.x reducer can still read it');
       assert.equal(opCounts.session_link, 1);
       assert.equal(opCounts.parent_set, 1);
       assert.equal(opCounts.close, 1);

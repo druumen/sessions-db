@@ -3,6 +3,13 @@
  * alias.
  * `sessions-db alias <stable_id> --clear` — remove the alias (sets to null).
  *
+ * 0.3.0: the alias became one channel of the session name model (channel
+ * `alias`, source `human`), but the event written is still `alias_set`. The
+ * reducer feeds that op into the channel model as well as the legacy
+ * `session.alias` field, so the model gains nothing from a new op — while an
+ * older reader on the same machine can still fold it. See
+ * `lib/operations.setAlias`.
+ *
  * Day 3 refactor: this handler is a thin wrapper around
  * `lib/operations.setAlias` — argparse + dry-run rendering + result-to-exit
  * mapping only. Existence-check is performed by the operation BEFORE the
@@ -10,7 +17,7 @@
  * of a synthesized empty session record.
  */
 
-import { setAlias } from '../lib/operations.mjs';
+import { aliasSetPayload, normalizeAliasValue, setAlias } from '../lib/operations.mjs';
 import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
 import { renderDryRun, reportResult, reportStableIdNotFound } from './_write-helpers.mjs';
 
@@ -82,9 +89,30 @@ export async function run(argv) {
     process.exit(2);
   }
 
+  // One normalisation for both the preview and the success echo, so neither
+  // can describe something other than what `setAlias` will store. `--clear`
+  // has no value to normalise.
+  let cleanAlias = null;
+  if (!clear) {
+    const normalized = normalizeAliasValue(aliasArg);
+    if (!normalized.ok) {
+      // The dry run has to refuse exactly what the write refuses. It used to
+      // sanitise for the preview and then not re-check, so an alias made
+      // entirely of escape sequences printed `{"alias":""}` and exit 0 —
+      // previewing an event the write path rejects outright.
+      const code = reportResult({
+        result: { ok: false, error: normalized.error },
+        op: 'alias_set', stableId, json, quiet,
+      });
+      process.exit(code);
+    }
+    cleanAlias = normalized.value;
+  }
+
   if (dryRun) {
-    const payload = clear ? { alias: null } : { alias: aliasArg };
-    renderDryRun({ op: 'alias_set', stableId, payload, json });
+    // Same builder the write path uses, so the preview cannot describe an
+    // event the real write would not have produced.
+    renderDryRun({ op: 'alias_set', stableId, payload: aliasSetPayload(cleanAlias), json });
     return;
   }
 
@@ -109,7 +137,11 @@ export async function run(argv) {
 
   const code = reportResult({
     result, op: 'alias_set', stableId, json, quiet,
-    extra: clear ? { cleared: true } : { alias: aliasArg },
+    // The STORED value, not the argument. Echoing the raw input printed the
+    // escape bytes straight back to the terminal the sanitiser exists to
+    // protect, and reported a name (`clean<ESC>[31mRED`) that differs from
+    // what the session is now actually called (`cleanRED`).
+    extra: clear ? { cleared: true } : { alias: cleanAlias },
   });
   if (code !== 0) process.exit(code);
 }

@@ -42,6 +42,12 @@ import type {
   IdentitySource,
   IdentityConfidence,
   EventOp,
+  // Names (0.3.0)
+  NameChannel,
+  NameSource,
+  SessionName,
+  NameHistoryEntry,
+  ResolvedDisplayName,
   // Composite shapes
   TranscriptFile,
   IdentityResolution,
@@ -98,8 +104,15 @@ import {
   // Sweep planner
   computeSweepTransitions,
   computeEffectiveLastProgress,
+  // Names
+  resolveDisplayName,
+  displayNameForSession,
+  nameValuesFromSession,
+  foldNameHistory,
+  nameSetPayload,
   // Sanitize
   sanitizeFirstPrompt,
+  sanitizeNameValue,
   // UUIDv7
   generateSessionId,
   isSessionId,
@@ -143,7 +156,13 @@ void findByClaudeSessionId;
 void findByTranscriptLineage;
 void computeSweepTransitions;
 void computeEffectiveLastProgress;
+void resolveDisplayName;
+void displayNameForSession;
+void nameValuesFromSession;
+void foldNameHistory;
+void nameSetPayload;
 void sanitizeFirstPrompt;
+void sanitizeNameValue;
 void generateSessionId;
 void isSessionId;
 void extractTimestamp;
@@ -290,6 +309,53 @@ const _projection: Projection = {
     'sess_018f1234-5678-7abc-89de-0123456789ab': _knownSession,
   },
 };
+
+// ---------------------------------------------------------------------------
+// Name-model shape smoke. `channel` and `source` are open strings by
+// contract, so the assertions that matter are that an UNKNOWN channel is
+// assignable (a new namer must be a non-event for consumers too) and that
+// `value: null` — a deliberate clear — is representable.
+// ---------------------------------------------------------------------------
+
+const _knownChannel: NameChannel = 'cc_custom_title';
+const _futureChannel: NameChannel = 'dru_cli_label';
+const _source: NameSource = 'human';
+
+const _name: SessionName = {
+  channel: _knownChannel,
+  value: 'redesign BM overview',
+  set_at: '2026-08-19T10:00:00.000Z',
+  source: _source,
+  set_count: 1,
+};
+
+const _clearedName: SessionName = {
+  channel: _futureChannel,
+  value: null,
+  set_at: null,
+  source: 'harvest',
+  set_count: 2,
+};
+
+const _nameHistoryEntry: NameHistoryEntry = {
+  channel: _knownChannel,
+  value: 'an older name',
+  set_at: '2026-08-01T10:00:00.000Z',
+  source: _source,
+  observed_from: '/t/a.jsonl',
+  op: 'name_set',
+  event_id: 'evt_018f1234-5678-7abc-89de-0123456789ac',
+};
+
+const _resolvedDisplayName: ResolvedDisplayName = {
+  display_name: 'redesign BM overview',
+  display_name_channel: _knownChannel,
+};
+
+void _name;
+void _clearedName;
+void _nameHistoryEntry;
+void _resolvedDisplayName;
 
 const _event: SessionEvent = {
   ts: '2026-05-10T20:50:00.000Z',

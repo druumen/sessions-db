@@ -76,13 +76,120 @@ export type IdentityConfidence = "exact" | "high" | "low" | "minted";
  *   close            — set outcome + closed_at + closed_reason
  *   sweep            — synthetic: activity_state transition (active → idle / archived)
  *   manual_link      — operator-supplied parent_candidate_ids merge
- *   ai_title_seen    — hook observation: latest `type:"ai-title"` record harvested
- *                      from the Claude Code transcript (last-write-wins; null clears)
+ *   ai_title_seen    — LEGACY (pre-0.3.0) hook observation: latest
+ *                      `type:"ai-title"` record harvested from the Claude Code
+ *                      transcript. Superseded by `name_set` (channel
+ *                      `cc_ai_title`); still reduced forever because the log is
+ *                      append-only and the 406 rows already written are where
+ *                      name history starts.
+ *   name_set         — set or clear one naming channel. The general form behind
+ *                      both legacy naming ops. Payload:
+ *                      `{ channel, value, source?, observed_from?, observed_at? }`.
+ *                      `channel` / `source` are OPEN strings — the reducer must
+ *                      preserve ones it does not recognise (see NameChannel)
  *   session_prune    — tombstone: drop a never-used ghost record from the
  *                      projection. Append-only — the prior events stay in
  *                      events.jsonl and the reducer re-deletes on replay.
  */
-export type EventOp = "session_seen" | "session_progress" | "session_link" | "session_unlink" | "alias_set" | "parent_set" | "close" | "sweep" | "manual_link" | "ai_title_seen" | "session_prune";
+export type EventOp = "session_seen" | "session_progress" | "session_link" | "session_unlink" | "alias_set" | "parent_set" | "close" | "sweep" | "manual_link" | "ai_title_seen" | "name_set" | "session_prune";
+/**
+ * Naming channel — WHICH surface produced a name.
+ *
+ * Typed as `string`, not a union, and that is the contract rather than
+ * laziness: the channel set is open so that adding a namer is a non-event, and
+ * the price of that is a hard rule — **a reader must preserve channels it does
+ * not recognise**. Typing this as a closed union would invite exactly the
+ * filtering that silently deletes a newer version's names on the next save.
+ *
+ * The ones this build knows about (`KNOWN_CHANNELS` in lib/names.mjs):
+ *   alias            — `sessions-db alias`, operator-set, never machine-written
+ *   cc_custom_title  — Claude Code UI rename, typed by a human
+ *   cc_ai_title      — Claude Code's LLM-generated title (drifts with the
+ *                      conversation — 51 real renames on the reference db)
+ *   agent_name       — agent-team badge; recorded but NOT in the display chain
+ *   first_prompt     — pseudo-channel for `first_prompt_preview`; never stored
+ *                      in `names[]`, exists so the precedence engine can name
+ *                      the fallback when it wins
+ *
+ * Bounded: 1-64 chars of `[A-Za-z0-9._-]`, starting alphanumeric.
+ */
+export type NameChannel = string;
+/**
+ * Authorship of a name value — WHO wrote it. Deliberately not a synonym for
+ * `NameChannel`: `cc_ai_title` and `cc_custom_title` arrive through the same
+ * harvesting hook but one was written by a model and the other typed by a
+ * person, and "show me only the names a human gave this session" is a question
+ * you cannot ask without this axis.
+ *
+ *   human   — a person typed it
+ *   llm     — a model generated it
+ *   harvest — collected without a distinguishable author (e.g. `agent_name`)
+ *
+ * Open string, same reasoning and same bounds as `NameChannel` (max 32 chars).
+ */
+export type NameSource = string;
+/**
+ * One channel's CURRENT name, as stored in `KnownSession.names[]`.
+ *
+ * The projection holds exactly one of these per channel — never the history.
+ * History lives in `events.jsonl` and is read back by `sessions-db names <id>`,
+ * which replays it. Inlining history here would make the projection grow with
+ * every rename, and the projection is the file every cockpit refresh reads
+ * whole.
+ *
+ * `value: null` means the name was deliberately CLEARED — which is not the
+ * same as never named, and is why a clear appends an entry rather than
+ * deleting one.
+ */
+export type SessionName = {
+    channel: NameChannel;
+    value: (string | null);
+    /**
+     * When the value was observed / set
+     */
+    set_at: (Iso8601 | null);
+    source: NameSource;
+    /**
+     * How many name events this channel has
+     * seen (O(1) stand-in for the history)
+     */
+    set_count: number;
+    /**
+     * Provenance, e.g. the transcript path
+     */
+    observed_from?: string;
+};
+/**
+ * One entry in a channel's replayed history (`sessions-db names <id>`), as
+ * produced by `foldNameHistory`. Carries the event that caused it so a reader
+ * can go back to the log.
+ */
+export type NameHistoryEntry = {
+    channel: NameChannel;
+    value: (string | null);
+    set_at: (Iso8601 | null);
+    source: NameSource;
+    observed_from: (string | null);
+    /**
+     * Which op carried it (legacy ops included)
+     */
+    op: EventOp;
+    event_id: (EventId | null);
+};
+/**
+ * Result of the display-name precedence chain.
+ *
+ * `display_name_channel` is not decoration. With `alias` outranking a Claude
+ * Code rename, a user can rename a session in Claude Code and see no change —
+ * the UI has to be able to answer "because an alias outranks it".
+ *
+ * Both fields are null when no channel in the chain has a value; inventing a
+ * placeholder is a rendering decision, not a model one.
+ */
+export type ResolvedDisplayName = {
+    display_name: (string | null);
+    display_name_channel: (NameChannel | null);
+};
 /**
  * One transcript file (`~/.claude/projects/<workspace-hash>/<uuid>.jsonl`)
  * as captured in a session's `transcript_files[]`.
@@ -189,10 +296,35 @@ export type KnownSession = {
     /**
      *           AI-generated session title harvested from the Claude Code
      *           transcript's `{"type":"ai-title", "aiTitle": ...}` records.
-     *           Independent from `alias` (user-set). Display priority for
-     *           `find`: alias ?? ai_title ?? first_prompt_preview.
+     *           Since 0.3.0 this and `alias` are DERIVED VIEWS of the
+     *           `cc_ai_title` / `alias` entries in `names[]`, kept so existing
+     *           consumers survive the schema change. Read `names[]` in new code.
      */
     ai_title: (string | null);
+    /**
+     * One entry per naming channel, current value only — see
+     * `SessionName`.
+     *
+     * **Optional on purpose.** A projection cache written before 0.3.0
+     * has no `names`, and loading one does not rewrite it — the field
+     * appears per session, when an event next touches that session. A
+     * consumer that assumes presence would be typed against a file
+     * shape that really exists on disk today, so the three name fields
+     * are declared optional and callers coalesce (`session.names ?? []`).
+     * `nameValuesFromSession` / `currentNameValue` already fall back to
+     * the legacy `alias` / `ai_title` mirrors for exactly this case.
+     */
+    names?: SessionName[];
+    /**
+     * Derived: the winner of the precedence chain
+     * (alias > cc_custom_title > cc_ai_title > first_prompt).
+     */
+    display_name?: (string | null);
+    /**
+     * Derived: which channel won, i.e. WHY the display shows what it
+     * shows.
+     */
+    display_name_channel?: (NameChannel | null);
     claude_session_ids: ClaudeSessionId[];
     transcript_files: TranscriptFile[];
     fingerprints: {
@@ -229,10 +361,16 @@ export type KnownSession = {
  * Cache file `_meta` block.
  */
 export type ProjectionMeta = {
-    /**
-     *           Pinned to `2` — bump when reducer semantics change
-     */
     schema_version: 2;
+    /**
+     * Which build of the name model materialised `names[]`. Absent on
+     * any projection written before 0.3.0; `loadProjection` treats
+     * absent-or-older as "this cache predates the model" and rebuilds
+     * from the event log. Distinct from `schema_version`, which pins
+     * the record SHAPE and stays 2.
+     * Pinned to `2` — bump when reducer semantics change
+     */
+    names_model_version?: number;
     /**
      *           Names of the fingerprint algorithms the writer emits
      *           (e.g. `['first_human_prompt_v1', 'lineage_prefix_v1']`)

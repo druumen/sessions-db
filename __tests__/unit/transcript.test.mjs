@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import {
   AI_TITLE_TAIL_MAX_BYTES,
   extractLatestAiTitle,
+  isMachineGeneratedCustomTitle,
   listTranscriptFiles,
   parseTranscriptFile,
   workspaceHashFromCwd,
@@ -404,5 +405,30 @@ describe('transcript.mjs — listTranscriptFiles', () => {
     // non-existent dir; we just need to assert the function does not throw.
     const out = listTranscriptFiles('/tmp/sessions-db-test-nonexistent');
     assert.deepEqual(out, []);
+  });
+});
+
+describe('transcript.mjs — isMachineGeneratedCustomTitle', () => {
+  it('recognises the one shape Claude Code writes into the human field', () => {
+    // Resuming from the picker stores `Resume session <8 hex>` in the SAME
+    // field a person types into. On the reference corpus that accounts for 1
+    // of the 6 distinct custom titles; the other 5 are real. Without this the
+    // harvester records a machine string as human authorship, and "show me
+    // the names a person gave this session" answers with it.
+    assert.equal(isMachineGeneratedCustomTitle('Resume session 2c3dbc67'), true);
+    assert.equal(isMachineGeneratedCustomTitle('Resume session deadbeef'), true);
+  });
+
+  it('leaves anything a person would plausibly type alone', () => {
+    // Deliberately exact rather than fuzzy: a false positive silently
+    // downgrades a name somebody chose, which is the more expensive mistake.
+    assert.equal(isMachineGeneratedCustomTitle('redesign BM overview'), false);
+    assert.equal(isMachineGeneratedCustomTitle('定价分析'), false);
+    assert.equal(isMachineGeneratedCustomTitle('Resume session'), false);
+    assert.equal(isMachineGeneratedCustomTitle('Resume session 2c3dbc6'), false, '7 hex, not 8');
+    assert.equal(isMachineGeneratedCustomTitle('Resume session ZZZZZZZZ'), false);
+    assert.equal(isMachineGeneratedCustomTitle('resume session 2c3dbc67'), false, 'case matters');
+    assert.equal(isMachineGeneratedCustomTitle('Resume session 2c3dbc67 again'), false);
+    assert.equal(isMachineGeneratedCustomTitle(null), false);
   });
 });
