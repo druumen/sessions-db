@@ -1095,3 +1095,185 @@ describe('UserPromptSubmit hook — promotion and heartbeat', () => {
     }
   });
 });
+
+/**
+ * Name harvesting from the PROMPT hook.
+ *
+ * Until this change, names were collected only at SessionStart — the one
+ * moment a session has nothing to collect, because Claude Code generates
+ * `ai-title` after the first exchange. The consequence was structural, not
+ * flaky: a session that is never resumed never gets a name in the database,
+ * measured at 289 of 688 records (42%) on the reference machine while their
+ * transcripts on disk carried a title.
+ *
+ * Every test here therefore runs the prompt hook with NO SessionStart run in
+ * between — that absence is the assertion. If a name event appears, only this
+ * hook can have written it.
+ */
+describe('UserPromptSubmit hook — name harvesting', () => {
+  const HARVEST_SID = '77777777-aaaa-bbbb-cccc-777777777777';
+
+  function appendRecord(transcriptPath, record) {
+    writeFileSync(transcriptPath, readFileSync(transcriptPath, 'utf8') + JSON.stringify(record) + '\n');
+  }
+
+  const appendAiTitle = (transcriptPath, aiTitle, sessionId = HARVEST_SID) =>
+    appendRecord(transcriptPath, { type: 'ai-title', aiTitle, sessionId });
+
+  const nameEvents = (ws) => readEvents(ws).filter((e) => e.op === 'name_set');
+
+  const prompt = (ws, transcriptPath, text, sid = HARVEST_SID) => runPromptHook({
+    cwd: ws,
+    stdin: JSON.stringify({
+      session_id: sid,
+      cwd: ws,
+      prompt: text,
+      ...(transcriptPath ? { transcript_path: transcriptPath } : {}),
+    }),
+    env: { HOME: ws },
+  });
+
+  it('a title generated mid-session reaches the db on the next prompt, with no resume', async () => {
+    const ws = makeFakeWorkspace({ prefix: 'prompt-harvest-' });
+    try {
+      const transcript = makeFakeTranscript(ws, HARVEST_SID);
+
+      // Turn 1: the record is created and there is genuinely nothing to
+      // harvest yet. This zero is a control for the assertion below — it
+      // proves the event that appears later comes from the title we append,
+      // not from anything the fixture already contained.
+      const first = await prompt(ws, transcript, 'first question');
+      assert.equal(first.code, 0, `stderr: ${first.stderr}`);
+      assert.equal(nameEvents(ws).length, 0, 'nothing to harvest before Claude Code names the session');
+      assert.equal(onlySession(ws).display_name_channel, 'first_prompt');
+
+      // Claude Code names the session — this is what it does after the first
+      // exchange, i.e. always after SessionStart has already run.
+      appendAiTitle(transcript, 'Session id 查询 title 命令');
+
+      const second = await prompt(ws, transcript, 'second question');
+      assert.equal(second.code, 0, `stderr: ${second.stderr}`);
+      assert.equal(second.stderr, '');
+
+      const session = onlySession(ws);
+      assert.equal(session.display_name, 'Session id 查询 title 命令');
+      assert.equal(session.display_name_channel, 'cc_ai_title');
+
+      const evs = nameEvents(ws);
+      assert.equal(evs.length, 1, 'exactly one name_set, written by the prompt hook');
+      assert.equal(evs[0].payload.channel, 'cc_ai_title');
+      assert.equal(evs[0].payload.source, 'llm');
+      assert.equal(evs[0].payload.observed_from, transcript, 'provenance points at the harvested file');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  // Differential: the harvest must read the transcript the PAYLOAD names. A
+  // hook that went looking for transcripts on its own would pass the test
+  // above and this one would still be green with the harvest deleted, so the
+  // two together pin the mechanism rather than the outcome.
+  it('harvests nothing when the payload carries no transcript_path', async () => {
+    const ws = makeFakeWorkspace({ prefix: 'prompt-harvest-nopath-' });
+    try {
+      const transcript = makeFakeTranscript(ws, HARVEST_SID);
+      await prompt(ws, transcript, 'first question');
+      appendAiTitle(transcript, 'a title nobody points us at');
+
+      // Same title on disk, same session — only the payload field is gone.
+      const r = await prompt(ws, null, 'second question');
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+      assert.equal(nameEvents(ws).length, 0);
+      assert.equal(onlySession(ws).display_name_channel, 'first_prompt');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  // Firing on every turn is the whole point, so the suppression that used to
+  // face one call per session start now faces one per prompt. If it stopped
+  // working the log would grow by an event per turn — invisible in any
+  // single-run test, which is why this one runs four turns.
+  it('re-asserting the same title on every turn appends nothing; a real rename lands', async () => {
+    const ws = makeFakeWorkspace({ prefix: 'prompt-harvest-idem-' });
+    try {
+      const transcript = makeFakeTranscript(ws, HARVEST_SID);
+      await prompt(ws, transcript, 'turn 1');
+      appendAiTitle(transcript, 'Original title');
+      await prompt(ws, transcript, 'turn 2');
+      assert.equal(nameEvents(ws).length, 1);
+
+      // Claude Code re-emits the SAME ai-title record every few KB.
+      appendAiTitle(transcript, 'Original title');
+      await prompt(ws, transcript, 'turn 3');
+      await prompt(ws, transcript, 'turn 4');
+      assert.equal(nameEvents(ws).length, 1, 'unchanged name must not append per turn');
+
+      // A genuine rename is a change and must land.
+      appendAiTitle(transcript, 'Renamed halfway through');
+      await prompt(ws, transcript, 'turn 5');
+      const evs = nameEvents(ws);
+      assert.equal(evs.length, 2);
+      assert.equal(evs[1].payload.value, 'Renamed halfway through');
+      assert.equal(onlySession(ws).display_name, 'Renamed halfway through');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  // The mint path: no pending record and no prior record, which is how a
+  // RESUMED session arrives after `sweepPending` reclaimed its staged record
+  // (documented at 24 h). That transcript already carries a name, so the
+  // harvest has to run on the id the mint just produced — not wait a turn.
+  it('mints and harvests in the same run when the record was lost but the transcript has a name', async () => {
+    const ws = makeFakeWorkspace({ prefix: 'prompt-harvest-mint-' });
+    try {
+      const transcript = makeFakeTranscript(ws, HARVEST_SID);
+      appendAiTitle(transcript, 'Resumed session keeps its name');
+
+      const r = await prompt(ws, transcript, 'typed after the pending record expired');
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+
+      const session = onlySession(ws);
+      assert.equal(session.display_name, 'Resumed session keeps its name');
+      assert.equal(session.display_name_channel, 'cc_ai_title');
+      const events = readEvents(ws);
+      assert.equal(events[0].payload.minted_from_prompt, true, 'this is the mint path, not promotion');
+      assert.equal(nameEvents(ws).length, 1);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  // The promotion path. Defensive rather than everyday: a session staged by
+  // SessionStart normally has no name yet when its first prompt promotes it.
+  // The branch exists so that when a name IS already there the record does not
+  // have to wait a turn for it, and it is covered here because an untested
+  // branch in a hook is a branch nobody notices going dead.
+  it('harvests on the promotion path when the staged session already has a name', async () => {
+    const ws = makeFakeWorkspace({ prefix: 'prompt-harvest-promote-' });
+    try {
+      // No human prompt in the transcript → SessionStart stages instead of recording.
+      const transcript = makeFakeTranscript(ws, HARVEST_SID, { firstPrompt: null });
+      const start = await runStartHook({
+        cwd: ws,
+        stdin: JSON.stringify({ session_id: HARVEST_SID, cwd: ws, transcript_path: transcript }),
+        env: { HOME: ws },
+      });
+      assert.equal(start.code, 0, `stderr: ${start.stderr}`);
+      assert.equal(existsSync(join(pendingDirOf(ws), `${HARVEST_SID}.json`)), true, 'staged, not recorded');
+      assert.equal(nameEvents(ws).length, 0, 'SessionStart had nothing to harvest');
+
+      appendAiTitle(transcript, 'Named before the first prompt landed');
+
+      const r = await prompt(ws, transcript, 'first prompt promotes the staged record');
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+      const events = readEvents(ws);
+      assert.equal(events[0].payload.promoted_from_pending, true);
+      assert.equal(nameEvents(ws).length, 1);
+      assert.equal(onlySession(ws).display_name, 'Named before the first prompt landed');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
