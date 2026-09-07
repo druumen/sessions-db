@@ -396,6 +396,26 @@ channel a human sets by hand.
 The rule is still the same as below — pin one version per machine rather
 than mixing.
 
+### Version skew: an old reader DROPS `pr_links` on a rebuild
+
+A pre-0.4.0 reducer treats `pr_link_seen` as an unknown op — a no-op that
+still counts toward `event_count`. Nothing in `events.jsonl` is lost and a
+0.4.0 `rebuild` restores every link, so this is recoverable rather than
+destructive. What makes it worth stating is the entry point named above for
+`name_set`: `loadProjection` rebuilds whenever the cache is missing or
+corrupt, so an older binary on the same machine drops `pr_links` *without
+anybody asking it to rebuild* — and the newer binary then reads that cache
+and believes it, because a hot cache is not re-derived.
+
+Measured 2026-09-07 against the published 0.3.0: 0.4.0 writes
+`pr_links = [#722]` → the cache file is removed → one ordinary 0.3.0 hook
+heartbeat rebuilds it → `pr_links` is gone → 0.4.0 reads the hot cache and
+still sees nothing → an explicit 0.4.0 `rebuild` brings it back.
+
+This matters most while the two versions are deliberately mixed — a machine
+running 0.4.0 from a checkout while cockpit still bundles 0.3.0 is exactly
+that window. Pin one version per machine.
+
 ### Version skew: an old reader RESURRECTS pruned records
 
 An older reader folding a 0.2.0 log tolerates `session_progress` as an
