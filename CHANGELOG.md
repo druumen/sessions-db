@@ -5,6 +5,64 @@ All notable changes to `@druumen/sessions-db` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — TBD
+
+Collect a session's facts while it is still alive, and record which MR it opened.
+
+Name harvesting ran only at SessionStart — the one moment a session has nothing
+to harvest, because Claude Code generates `ai-title` after the first exchange.
+The consequence was structural rather than flaky: a session that is never
+resumed never gets a name at all. Measured on a 688-record reference database,
+**289 records (42%) carried no harvested name** while their transcripts on disk
+carried one.
+
+The same transcript records which merge request a session opened
+(`{"type":"pr-link", "prNumber":…, "prRepository":…}`) and nothing was reading
+it, so "which MR came out of this session" had no answer on the database side.
+
+### Added
+
+- **`pr_links[]` on a session (`lib/pr-links.mjs`)** — the MRs a session
+  opened, harvested from the transcript's `pr-link` records via the new
+  `pr_link_seen` event. Identity is `(repository, number)`, because a bare
+  number is ambiguous the moment a workspace touches two repos. Union merge,
+  earliest observation wins ("when was it opened"). MR state and title are
+  deliberately not stored — they change after the transcript was written.
+- **MR search** — `search 722` / `#722` / `!722` find the session; repository
+  path and url match by substring. The number does **not** match by substring:
+  `72` does not find `#722`.
+- **`sessions-db harvest`** — backfill names and links from transcripts already
+  on disk, for records no hook will ever fire for again. Dry run by default;
+  `--yes` writes. Resolves each transcript by `claude_session_id`, never
+  through `transcript_files[]` (70% of whose entries name a file belonging to
+  no claude_session_id of their record).
+
+### Changed
+
+- **`UserPromptSubmit` now harvests too (`lib/harvest.mjs`, extracted from the
+  SessionStart hook).** From the second prompt onward the current title is in
+  the database without the session being resumed. Cost, measured on the
+  reference machine: +0.5–2.2 ms and +1.3 MB peak RSS per prompt, against a
+  hook that already spends ~7 ms on a projection read-modify-write and ~20 ms
+  on node start.
+- **`extractLatestTitles` also returns `prLinks[]`**, collected in the same
+  256 KiB tail scan. Its early exit is gone (a session can open several MRs, so
+  "we have one" was never evidence there is not an older one further up); a
+  substring pre-filter more than pays for the longer walk — p50 0.78–0.81 ms
+  against 0.84–0.96 ms before.
+- **`recordFirstPrompt` returns `{ok, stableId}`** instead of a bare boolean.
+
+### Fixed
+
+- **Harvest events no longer move `last_progress_at`.** Observing a name or a
+  link is a fact *about* a session, not activity *by* it; folding hundreds of
+  them in a backfill dated every touched record to the moment of the backfill.
+  Measured before the fix: 246 of 246 backfilled records jumped forward, median
+  +50 days, max +98 days — which re-sorted `search` / `find` and left 192
+  records in `active` that `sweep` would have retired. `ai_title_seen` is
+  exempt for the same reason; replaying an existing log moves 268 records
+  *earlier* by 7 ms–1.7 s, which is the correct value.
+
 ## [0.3.0] — 2026-08-19
 
 Give a session all of its names, and give the names a history.

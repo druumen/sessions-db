@@ -61,10 +61,23 @@ export function harvestFromTranscript({ stableId, transcriptPath, recordTargetOp
  * keeping ONE harvest implementation beats optimising the once-a-lifetime
  * path into a second one.
  *
+ * ## Why there is no "only the un-harvested ones" filter
+ *
+ * There was one, and it was a lie: `!hasHarvestedName || !hasLinks` is true
+ * for 688 of 688 records on the reference machine, because most sessions
+ * never open an MR and `!hasLinks` is therefore permanently true. The flag
+ * that switched it off (`--all`) changed no count on real data — reviewed and
+ * measured, both branches produced 688/301/246/376.
+ *
+ * The honest version is that "already harvested" is not knowable without
+ * reading the transcript: a record with no links is indistinguishable from
+ * one whose links we have not looked for yet. So the backfill visits
+ * everything, and the per-event suppression — which asks the reducer, not a
+ * heuristic — is what keeps a re-run from writing anything. At 1.9 s over 688
+ * records that is cheap enough to be the whole design.
+ *
  * @param {{root?: string, rootPath?: string, paths?: object, dryRun?: boolean,
- *   limit?: number, all?: boolean}} [opts]
- *   `all: true` visits every session; the default visits only those still
- *   missing a harvested name or a link, which is the population it is for.
+ *   limit?: number}} [opts]
  * @returns {Promise<{ok: boolean, dryRun: boolean, scanned: number,
  *   withTranscript: number, changed: number, events: number,
  *   sessions: Array<{stable_id: string, transcript: string, ops: string[]}>}>}
@@ -75,7 +88,6 @@ export function runHarvest(opts?: {
     paths?: object;
     dryRun?: boolean;
     limit?: number;
-    all?: boolean;
 }): Promise<{
     ok: boolean;
     dryRun: boolean;

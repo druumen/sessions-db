@@ -464,12 +464,16 @@ Apache 2.0 — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
 - **0.2.0**: `UserPromptSubmit` hook (real first-prompt preview,
   live progress timestamps, branch drift), deferral of never-used sessions
   so ghosts are not created, and `prune` to clear historical ones.
-- **0.3.0** (current): the session **name model** — every naming channel
-  recorded with its authorship and history, `sessions-db names <id>`,
-  name-aware `search` (`--include-history`), and one shared precedence
-  chain for every consumer.
-- **0.4.0** (TBD): parent_candidate auto-promote heuristic, outcome
-  auto-derive on `/task-done` linkage.
+- **0.3.0**: the session **name model** — every naming channel recorded with
+  its authorship and history, `sessions-db names <id>`, name-aware `search`
+  (`--include-history`), and one shared precedence chain for every consumer.
+- **0.4.0** (current): harvesting on **every prompt** rather than only at
+  session start (a session that is never resumed used to never get a name),
+  `pr_links[]` + MR search, and `sessions-db harvest` to backfill records no
+  hook will fire for again.
+- **0.4.x** (TBD): parent_candidate auto-promote heuristic, outcome
+  auto-derive on `/task-done` linkage — planned for 0.4.0 before that number
+  was taken by the harvest work; the scope is unchanged.
 - **0.5.0** (TBD): Multi-machine sync (schema_version=3 break,
   documented migration).
 - **0.5.0+** (TBD): Web UI / VS Code Sessions panel via

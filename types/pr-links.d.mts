@@ -59,27 +59,22 @@ export function prLinkFromEvent(event: object): {
  * @returns {boolean} true when the session changed
  */
 export function applyPrLinkToSession(session: object, link: object): boolean;
-/**
- * Does this session carry a link the query refers to?
- *
- * Accepts the forms a person actually types: `722`, `#722`, `!722` (GitLab's
- * MR sigil), `druumen/cn/drummen#722`, a bare repository path, or any
- * substring of the url. The bare-number form matches on the NUMBER only —
- * `72` must not match `#722`, because a query that silently widens is worse
- * than one that finds nothing.
- *
- * @param {object} session
- * @param {string} query
- * @returns {boolean}
- */
-export function sessionMatchesPrQuery(session: object, query: string): boolean;
+export function sessionMatchesPrQuery(session: any, query: any): any;
 /** Bounds. Same reasoning as the name model: a record must not become a
  * general-purpose payload lane, and a value that is printed on a terminal
  * must not be able to drive it. */
 export const MAX_PR_REPOSITORY_LEN: 200;
 export const MAX_PR_URL_LEN: 1024;
-/** A forge number is small; anything larger is a parser error, not an MR. */
-export const MAX_PR_NUMBER: 10000000;
+/**
+ * A forge number is small; anything larger is a parser error, not an MR.
+ *
+ * Seven digits, and the search predicate's `\d{1,7}` is derived from this
+ * constant rather than written next to it — they were written separately once
+ * and disagreed by exactly one value (10000000 stored fine and was
+ * unsearchable), which is the whole failure mode of two hand-kept bounds.
+ */
+export const MAX_PR_NUMBER: 9999999;
+export const MAX_PR_NUMBER_DIGITS: number;
 /** Cap per session, mirroring MAX_CHANNELS_PER_SESSION. Sessions that open
  * more MRs than this exist in theory; the cap keeps one runaway writer from
  * inflating the projection every consumer reads whole. */

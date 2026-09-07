@@ -20,7 +20,6 @@ const SPEC = {
   flags: {
     '--yes': { type: 'boolean' },
     '--dry-run': { type: 'boolean' },
-    '--all': { type: 'boolean' },
     '--limit': { type: 'number' },
     '--json': { type: 'boolean' },
     '--root': { type: 'string' },
@@ -29,7 +28,7 @@ const SPEC = {
 };
 
 export const HELP = formatHelp({
-  usage: 'sessions-db harvest [--yes] [--limit <n>] [--all]',
+  usage: 'sessions-db harvest [--yes] [--limit <n>]',
   summary:
     'Backfill session names (ai-title / custom-title / agent-name) and the MRs\n' +
     'a session opened (pr-link) from transcripts already on disk.\n' +
@@ -42,7 +41,6 @@ export const HELP = formatHelp({
   flags: [
     { name: '--yes',        desc: 'actually write the events (without this, report only)' },
     { name: '--dry-run',    desc: 'force report-only (the default; explicit for scripts)' },
-    { name: '--all',        desc: 'visit every session, not only the un-harvested ones' },
     { name: '--limit <n>',  desc: 'stop after n sessions that had a transcript (try a small run first)' },
     { name: '--json',       desc: 'JSON output (machine-readable)' },
     { name: '--root <p>',   desc: 'override storage root (default cwd)' },
@@ -84,7 +82,6 @@ export async function run(argv) {
   const root = parsed.flags['--root'];
   const result = await runHarvest({
     dryRun: !confirmed,
-    all: parsed.flags['--all'] === true,
     ...(parsed.flags['--limit'] !== undefined ? { limit: parsed.flags['--limit'] } : {}),
     ...(root ? { root } : {}),
   });

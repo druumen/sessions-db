@@ -74,6 +74,18 @@ describe('pr-links.mjs — payload normalisation', () => {
   });
 });
 
+describe('pr-links.mjs — the number bound and the query regex agree', () => {
+  it('the largest allowed number can be stored AND found', () => {
+    assert.notEqual(prLinkSeenPayload({ repository: REPO, number: MAX_PR_NUMBER }), null);
+    const s = { pr_links: [{ repository: REPO, number: MAX_PR_NUMBER, url: null, first_seen_at: null }] };
+    assert.equal(sessionMatchesPrQuery(s, String(MAX_PR_NUMBER)), true,
+      'a number the writer accepts must be reachable by the reader');
+    // One past the bound is refused at the write side, so the reader never
+    // needs an opinion about it.
+    assert.equal(prLinkSeenPayload({ repository: REPO, number: MAX_PR_NUMBER + 1 }), null);
+  });
+});
+
 describe('pr-links.mjs — identity and formatting', () => {
   it('identity is (repository, number), not the number alone', () => {
     assert.notEqual(
@@ -192,6 +204,40 @@ describe('projection — pr_link_seen', () => {
     const p = base();
     applyEvent(p, ev({ repository: REPO, number: 9 }, '2026-01-02T03:04:05.000Z'));
     assert.equal(p.sessions.sess_test.pr_links[0].first_seen_at, '2026-01-02T03:04:05.000Z');
+  });
+
+  it('does NOT move last_progress_at — harvesting is an observation, not activity', () => {
+    const p = base();
+    // Seed the session with a real progress event from months ago.
+    applyEvent(p, {
+      event_id: 'evt_seed', ts: '2026-06-01T00:00:00.000Z', op: 'session_progress',
+      stable_id: 'sess_test', payload: { claude_session_id: 'x' },
+    });
+    assert.equal(p.sessions.sess_test.last_progress_at, '2026-06-01T00:00:00.000Z');
+
+    // Backfilling a link and a name today must not date the session to today:
+    // `sessions-db harvest` folds hundreds of these at once.
+    for (const op of ['pr_link_seen', 'name_set']) {
+      applyEvent(p, {
+        event_id: `evt_${op}`, ts: '2026-09-07T12:00:00.000Z', op, stable_id: 'sess_test',
+        payload: op === 'name_set'
+          ? { channel: 'cc_ai_title', value: 'harvested today', source: 'llm' }
+          : prLinkSeenPayload({ repository: REPO, number: 722 }),
+      });
+      assert.equal(p.sessions.sess_test.last_progress_at, '2026-06-01T00:00:00.000Z',
+        `${op} must not bump last_progress_at`);
+    }
+    // The observation still landed — this is not "the event was ignored".
+    assert.equal(p.sessions.sess_test.display_name, 'harvested today');
+    assert.equal(p.sessions.sess_test.pr_links.length, 1);
+
+    // Control: the exemption is per-op, not a blanket stop. A real progress
+    // event on the same projection still moves it.
+    applyEvent(p, {
+      event_id: 'evt_live', ts: '2026-09-07T13:00:00.000Z', op: 'session_progress',
+      stable_id: 'sess_test', payload: { claude_session_id: 'x' },
+    });
+    assert.equal(p.sessions.sess_test.last_progress_at, '2026-09-07T13:00:00.000Z');
   });
 
   it('drops an event whose payload has no usable number instead of storing a hole', () => {
