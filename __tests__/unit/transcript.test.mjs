@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import {
   AI_TITLE_TAIL_MAX_BYTES,
   extractLatestAiTitle,
+  extractLatestTitles,
   isMachineGeneratedCustomTitle,
   listTranscriptFiles,
   parseTranscriptFile,
@@ -430,5 +431,122 @@ describe('transcript.mjs — isMachineGeneratedCustomTitle', () => {
     assert.equal(isMachineGeneratedCustomTitle('resume session 2c3dbc67'), false, 'case matters');
     assert.equal(isMachineGeneratedCustomTitle('Resume session 2c3dbc67 again'), false);
     assert.equal(isMachineGeneratedCustomTitle(null), false);
+  });
+});
+
+/**
+ * `pr-link` collection. Same tail window as the names — the point of putting
+ * it here is that the read is the expensive part and it is already paid for.
+ */
+describe('transcript.mjs — extractLatestTitles collects pr-links', () => {
+  const SID = '77777777-aaaa-bbbb-cccc-777777777777';
+  const REPO = 'druumen/cn/drummen';
+  const url = (n) => `https://gitlab.tinfant.org/${REPO}/-/merge_requests/${n}`;
+  const prLine = (n, ts, over = {}) => JSON.stringify({
+    type: 'pr-link', sessionId: SID, prNumber: n, prUrl: url(n), prRepository: REPO, timestamp: ts, ...over,
+  });
+  const turn = (i) => JSON.stringify({
+    type: 'assistant', uuid: `u${i}`, sessionId: SID,
+    message: { role: 'assistant', content: [{ type: 'text', text: `filler ${i}` }] },
+  });
+
+  function write(lines, prefix = 'sdb-prlink-') {
+    const tmp = mkdtempSync(join(tmpdir(), prefix));
+    const p = join(tmp, `${SID}.jsonl`);
+    writeFileSync(p, lines.join('\n') + '\n');
+    return { tmp, p };
+  }
+
+  it('collects a link, and returns [] when there is none', () => {
+    const withLink = write([turn(1), prLine(722, '2026-09-07T16:04:20.294Z'), turn(2)]);
+    const without = write([turn(1), turn(2)], 'sdb-prlink-none-');
+    try {
+      assert.deepEqual(extractLatestTitles(withLink.p).prLinks, [{
+        repository: REPO, number: 722, url: url(722), observedAt: '2026-09-07T16:04:20.294Z',
+      }]);
+      // The control for the assertion above: the same scan on a transcript
+      // without the record must be able to say "none".
+      assert.deepEqual(extractLatestTitles(without.p).prLinks, []);
+    } finally {
+      rmSync(withLink.tmp, { recursive: true, force: true });
+      rmSync(without.tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('dedupes the 100+ re-emissions of one link and keeps the earliest timestamp', () => {
+    const lines = [];
+    for (let i = 0; i < 40; i++) {
+      lines.push(prLine(722, `2026-09-07T16:${String(10 + i).padStart(2, '0')}:00.000Z`));
+      lines.push(turn(i));
+    }
+    const { tmp, p } = write(lines, 'sdb-prlink-dedupe-');
+    try {
+      const links = extractLatestTitles(p).prLinks;
+      assert.equal(links.length, 1, '40 emissions of one MR is one entry');
+      assert.equal(links[0].observedAt, '2026-09-07T16:10:00.000Z', 'earliest in the window wins');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps two different MRs from one session', () => {
+    const { tmp, p } = write([
+      prLine(672, '2026-09-06T10:00:00.000Z'), turn(1),
+      prLine(722, '2026-09-07T16:04:20.294Z'), turn(2),
+    ], 'sdb-prlink-two-');
+    try {
+      const numbers = extractLatestTitles(p).prLinks.map((l) => l.number).sort((a, b) => a - b);
+      assert.deepEqual(numbers, [672, 722]);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a record with no usable number, and one that is not a pr-link at all', () => {
+    const { tmp, p } = write([
+      prLine(0, '2026-09-07T16:00:00.000Z'),
+      JSON.stringify({ type: 'pr-link', sessionId: SID, prUrl: url(1), prRepository: REPO }),
+      JSON.stringify({ type: 'user', sessionId: SID, message: { role: 'user', content: 'talking about a pr-link' } }),
+    ], 'sdb-prlink-junk-');
+    try {
+      assert.deepEqual(extractLatestTitles(p).prLinks, []);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('still finds the names when links are present — collecting both is one walk', () => {
+    const { tmp, p } = write([
+      JSON.stringify({ type: 'ai-title', aiTitle: 'a named session', sessionId: SID }),
+      prLine(722, '2026-09-07T16:04:20.294Z'),
+      turn(1),
+    ], 'sdb-prlink-names-');
+    try {
+      const out = extractLatestTitles(p);
+      assert.equal(out.aiTitle, 'a named session');
+      assert.equal(out.prLinks.length, 1);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('finds a link that sits ABOVE the newest name — the early exit used to hide it', () => {
+    // Order matters: walking backwards, the names are met first. The old
+    // implementation stopped as soon as the three names were filled, which
+    // would have left this link unseen.
+    const { tmp, p } = write([
+      prLine(672, '2026-09-06T10:00:00.000Z'),
+      JSON.stringify({ type: 'agent-name', agentName: 'side-session', sessionId: SID }),
+      JSON.stringify({ type: 'custom-title', customTitle: 'typed name', sessionId: SID }),
+      JSON.stringify({ type: 'ai-title', aiTitle: 'generated name', sessionId: SID }),
+      turn(1),
+    ], 'sdb-prlink-above-');
+    try {
+      const out = extractLatestTitles(p);
+      assert.equal(out.customTitle, 'typed name');
+      assert.deepEqual(out.prLinks.map((l) => l.number), [672]);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

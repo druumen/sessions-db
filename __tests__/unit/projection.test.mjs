@@ -985,5 +985,62 @@ describe('projection.mjs', () => {
       assert.equal(old.sessions[SID].last_progress_at, TS_D,
         'and dates it from the tombstone, i.e. more recent than it ever really was');
     });
+
+    // -----------------------------------------------------------------------
+    // Version skew — third member of the family, added with `pr_link_seen`
+    // (0.4.0). Same rule as the two above: a new op must be documented under
+    // "Version skew" in the README and pinned here, or the documentation
+    // quietly stops being true.
+    //
+    // This one is NOT destructive to `events.jsonl` — every row survives and a
+    // newer `rebuild` restores the links. What makes it worth pinning is the
+    // entry point the README already names for `name_set`: `loadProjection`
+    // rebuilds whenever the cache is missing or corrupt, so an older binary on
+    // the same machine drops `pr_links` *without anybody asking it to
+    // rebuild*, and the newer binary then reads that cache and believes it.
+    //
+    // Measured 2026-09-07 against the published 0.3.0: 0.4.0 writes
+    // `pr_links = [#722]` → cache removed → one ordinary 0.3.0 heartbeat →
+    // `pr_links` is gone → 0.4.0 reads the hot cache and still sees nothing →
+    // an explicit 0.4.0 `rebuild` brings it back.
+    // -----------------------------------------------------------------------
+    it('an old reducer (no pr_link_seen case) drops pr_links — README "Version skew"', () => {
+      // `applyEvent` minus the one case, which is exactly what 0.3.0 is.
+      const prePrLinkApply = (projection, event) => {
+        const { op, stable_id: stableId, ts } = event;
+        let session = projection.sessions[stableId];
+        if (!session) {
+          session = emptySession(stableId, ts);
+          projection.sessions[stableId] = session;
+        }
+        if (op === 'session_seen') {
+          const p = event.payload ?? {};
+          if (p.claude_session_id) session.claude_session_ids.push(p.claude_session_id);
+        }
+        // No `case 'pr_link_seen'` — an unknown op is a no-op for the record.
+        projection._meta.event_count += 1;
+        return projection;
+      };
+
+      const events = [
+        evt('session_seen', TS_A, { claude_session_id: 'csid-1' }),
+        evt('pr_link_seen', TS_B, {
+          repository: 'druumen/cn/drummen',
+          number: 722,
+          url: 'https://gitlab.tinfant.org/druumen/cn/drummen/-/merge_requests/722',
+        }, 'b'),
+      ];
+
+      const current = rebuildFromEvents(events);
+      assert.deepEqual(current.sessions[SID].pr_links.map((l) => l.number), [722],
+        'control: the current reducer does fold the link, so the loss below is the OLD reducer');
+
+      const old = emptyProjection();
+      for (const e of events) prePrLinkApply(old, e);
+      assert.deepEqual(old.sessions[SID].pr_links, [],
+        'an old reducer rebuilding the cache leaves the links out of the projection');
+      assert.equal(old._meta.event_count, 2,
+        'while still counting the event, so nothing downstream notices the gap');
+    });
   });
 });

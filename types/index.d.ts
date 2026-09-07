@@ -56,6 +56,8 @@ export type {
   SessionName,
   NameHistoryEntry,
   ResolvedDisplayName,
+  // MR links (0.4.0) — see lib/pr-links.mjs
+  PrLink,
   // Composite shapes
   TranscriptFile,
   IdentityResolution,

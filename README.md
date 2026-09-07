@@ -396,6 +396,26 @@ channel a human sets by hand.
 The rule is still the same as below — pin one version per machine rather
 than mixing.
 
+### Version skew: an old reader DROPS `pr_links` on a rebuild
+
+A pre-0.4.0 reducer treats `pr_link_seen` as an unknown op — a no-op that
+still counts toward `event_count`. Nothing in `events.jsonl` is lost and a
+0.4.0 `rebuild` restores every link, so this is recoverable rather than
+destructive. What makes it worth stating is the entry point named above for
+`name_set`: `loadProjection` rebuilds whenever the cache is missing or
+corrupt, so an older binary on the same machine drops `pr_links` *without
+anybody asking it to rebuild* — and the newer binary then reads that cache
+and believes it, because a hot cache is not re-derived.
+
+Measured 2026-09-07 against the published 0.3.0: 0.4.0 writes
+`pr_links = [#722]` → the cache file is removed → one ordinary 0.3.0 hook
+heartbeat rebuilds it → `pr_links` is gone → 0.4.0 reads the hot cache and
+still sees nothing → an explicit 0.4.0 `rebuild` brings it back.
+
+This matters most while the two versions are deliberately mixed — a machine
+running 0.4.0 from a checkout while cockpit still bundles 0.3.0 is exactly
+that window. Pin one version per machine.
+
 ### Version skew: an old reader RESURRECTS pruned records
 
 An older reader folding a 0.2.0 log tolerates `session_progress` as an
@@ -464,12 +484,16 @@ Apache 2.0 — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
 - **0.2.0**: `UserPromptSubmit` hook (real first-prompt preview,
   live progress timestamps, branch drift), deferral of never-used sessions
   so ghosts are not created, and `prune` to clear historical ones.
-- **0.3.0** (current): the session **name model** — every naming channel
-  recorded with its authorship and history, `sessions-db names <id>`,
-  name-aware `search` (`--include-history`), and one shared precedence
-  chain for every consumer.
-- **0.4.0** (TBD): parent_candidate auto-promote heuristic, outcome
-  auto-derive on `/task-done` linkage.
+- **0.3.0**: the session **name model** — every naming channel recorded with
+  its authorship and history, `sessions-db names <id>`, name-aware `search`
+  (`--include-history`), and one shared precedence chain for every consumer.
+- **0.4.0** (current): harvesting on **every prompt** rather than only at
+  session start (a session that is never resumed used to never get a name),
+  `pr_links[]` + MR search, and `sessions-db harvest` to backfill records no
+  hook will fire for again.
+- **0.4.x** (TBD): parent_candidate auto-promote heuristic, outcome
+  auto-derive on `/task-done` linkage — planned for 0.4.0 before that number
+  was taken by the harvest work; the scope is unchanged.
 - **0.5.0** (TBD): Multi-machine sync (schema_version=3 break,
   documented migration).
 - **0.5.0+** (TBD): Web UI / VS Code Sessions panel via

@@ -190,12 +190,29 @@ export function extractLatestAiTitle(path: string, opts?: {
  * Scanning once for all three costs exactly what scanning once for one did —
  * the expensive part is the read, not the compare.
  *
+ * ## It also collects `pr-link`
+ *
+ * The name says titles, and the export keeps that name because it is public
+ * surface (`lib/index.mjs`), but the same window carries one more fact worth
+ * having: Claude Code writes
+ *
+ *   { "type": "pr-link", "prNumber": 722, "prUrl": "...",
+ *     "prRepository": "druumen/cn/drummen", "timestamp": "..." }
+ *
+ * when a session opens a merge request. Collecting it here rather than in a
+ * second scan is the same argument as above — the read is the expensive part,
+ * and this one is already paid for. Unlike the names it is a LIST: a session
+ * can open several MRs, and each is a separate fact about it.
+ *
  * @param {string} path absolute path to a Claude Code transcript jsonl
  * @param {{ maxTailBytes?: number }} [opts]
  * @returns {{ aiTitle: string|null, customTitle: string|null,
- *   agentName: string|null, sessionId: string|null }|null}
- *   `null` when the file is missing or empty. Individual fields are null when
- *   the tail window holds no record of that kind.
+ *   agentName: string|null, sessionId: string|null,
+ *   prLinks: Array<{repository: string|null, number: number,
+ *     url: string|null, observedAt: string|null}> }|null}
+ *   `null` when the file is missing or empty. Individual name fields are null
+ *   when the tail window holds no record of that kind; `prLinks` is `[]`,
+ *   newest-first, never null.
  */
 /**
  * Does this `custom-title` look like the one Claude Code writes for itself?
@@ -222,6 +239,7 @@ export function extractLatestTitles(path: any, opts?: {}): {
     customTitle: any;
     agentName: any;
     sessionId: any;
+    prLinks: any[];
 };
 /**
  * Maximum bytes scanned from the tail of a transcript when looking for the

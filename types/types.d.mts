@@ -87,11 +87,15 @@ export type IdentityConfidence = "exact" | "high" | "low" | "minted";
  *                      `{ channel, value, source?, observed_from?, observed_at? }`.
  *                      `channel` / `source` are OPEN strings — the reducer must
  *                      preserve ones it does not recognise (see NameChannel)
+ *   pr_link_seen     — a merge request this session opened, harvested from
+ *                      Claude Code's `pr-link` transcript record. Union-merged
+ *                      into `pr_links[]` (see lib/pr-links.mjs); identity is
+ *                      (repository, number), earliest observation wins.
  *   session_prune    — tombstone: drop a never-used ghost record from the
  *                      projection. Append-only — the prior events stay in
  *                      events.jsonl and the reducer re-deletes on replay.
  */
-export type EventOp = "session_seen" | "session_progress" | "session_link" | "session_unlink" | "alias_set" | "parent_set" | "close" | "sweep" | "manual_link" | "ai_title_seen" | "name_set" | "session_prune";
+export type EventOp = "session_seen" | "session_progress" | "session_link" | "session_unlink" | "alias_set" | "parent_set" | "close" | "sweep" | "manual_link" | "ai_title_seen" | "name_set" | "pr_link_seen" | "session_prune";
 /**
  * Naming channel — WHICH surface produced a name.
  *
@@ -189,6 +193,28 @@ export type NameHistoryEntry = {
 export type ResolvedDisplayName = {
     display_name: (string | null);
     display_name_channel: (NameChannel | null);
+};
+/**
+ * One merge request a session opened, as stored in `KnownSession.pr_links[]`.
+ *
+ * `repository` can be null (an older Claude Code, or a value that failed
+ * normalisation) — such a link groups under its bare number, which is the
+ * best identity available for it. `url` can be null for the same reason, or
+ * because it was not http(s) and was refused. `number` is never null: a link
+ * you cannot address is not stored at all.
+ *
+ * `first_seen_at` is the EARLIEST observation, not the latest — the question
+ * the record answers is when this session opened that MR. MR state and title
+ * are deliberately absent; they change after the transcript was written.
+ */
+export type PrLink = {
+    /**
+     * e.g. "druumen/cn/drummen"
+     */
+    repository: (string | null);
+    number: number;
+    url: (string | null);
+    first_seen_at: (Iso8601 | null);
 };
 /**
  * One transcript file (`~/.claude/projects/<workspace-hash>/<uuid>.jsonl`)
@@ -326,6 +352,12 @@ export type KnownSession = {
      */
     display_name_channel?: (NameChannel | null);
     claude_session_ids: ClaudeSessionId[];
+    /**
+     * MRs this session opened. Optional in the type for the same reason
+     * `names` is: records written before 0.4.0 do not have the array,
+     * and `refreshDerivedNames` materialises it on load.
+     */
+    pr_links?: PrLink[];
     transcript_files: TranscriptFile[];
     fingerprints: {
         first_human_prompt_v1: (string | null);

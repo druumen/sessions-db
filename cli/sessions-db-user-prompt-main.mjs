@@ -48,6 +48,28 @@
  *     HEAD --abbrev-ref HEAD) ................ p50  6 ms   p95   6 ms
  *   projection read-modify-write under lock .. p50 17 ms   p95  33 ms
  *   node cold start .......................... ~20 ms
+ *   name harvest tail-scan (256 KiB window) ..      0.5-2.2 ms
+ *
+ * The last line was measured 2026-09-07 against this machine's LARGEST
+ * transcript (41.2 MB, 5 runs): the window is fixed, so file size does not
+ * enter it — that number is the ceiling, not an average. It buys the
+ * database the session's current title without a resume; see
+ * `lib/harvest.mjs` for why collecting only at SessionStart left 42%
+ * of records unnamed.
+ *
+ * RAM, measured the same day with `/usr/bin/time -l` on this hook end to end
+ * (3 runs each, isolated fixture workspace, maximum resident set size):
+ *
+ *   bare `node -e ''` ........................ 38.0 MB
+ *   hook with the harvest mutated out ........ 51.4-51.9 MB
+ *   hook + harvest, 41.2 MB transcript ....... 52.8-53.1 MB
+ *   hook + harvest, 277 byte transcript ...... 51.7-51.9 MB
+ *
+ * The harvest costs ~1.3 MB of peak RSS, and the last row is why that number
+ * is the WINDOW rather than the file: a transcript ~150000x smaller lands
+ * inside the no-harvest range, while the 41 MB one does not grow past the
+ * window either. It is also transient — this hook is a per-prompt process
+ * that exits; nothing stays resident between turns.
  *
  * Copying SessionStart's six probes would have spent more than half the
  * budget re-measuring facts that cannot change mid-session (worktree
@@ -55,14 +77,17 @@
  * exactly the two things that DO drift — branch and HEAD — plus the worktree
  * root it needs to anchor storage, and gets all three from a single spawn.
  *
- * The transcript is not read at all: `UserPromptSubmit` hands us the prompt
+ * The PROMPT is not read from the transcript: `UserPromptSubmit` hands us the
  * text directly, which is both cheaper and more correct than waiting for
- * Claude Code to flush it to the transcript.
+ * Claude Code to flush it. The transcript is opened for exactly one other
+ * purpose — the 256 KiB tail scan that harvests the session's current name
+ * (`lib/harvest.mjs`), which has no payload equivalent.
  */
 
 import { createHash } from 'node:crypto';
 
 import { gitContextFast } from '../lib/git-context.mjs';
+import { harvestFromTranscript } from '../lib/harvest.mjs';
 import {
   hasInitializedStorage,
   isDruumenWorkspace,
@@ -118,6 +143,12 @@ async function main() {
   if (!claudeSessionId || !looksLikeUuid(claudeSessionId)) {
     process.exit(0);
   }
+
+  // (4a) transcript_path — OPTIONAL, and only ever used for name harvesting.
+  // Nothing downstream may become conditional on it: an older Claude Code
+  // that omits the field, or a payload we could not parse, must still get the
+  // heartbeat. `harvestFromTranscript` no-ops on a null/missing path.
+  const transcriptPath = pickString(input?.transcript_path) || null;
 
   // (5) git context — ONE spawn (see the budget note in the file header).
   // A short budget: on a wedged repo we would rather write the progress event
@@ -177,7 +208,8 @@ async function main() {
   }
 
   // (7) The prompt itself. This is the payload field that makes the whole
-  // hook worthwhile — no transcript read, no waiting for a flush.
+  // hook worthwhile — the prompt text needs no transcript read and no waiting
+  // for a flush.
   //
   // Privacy opt-out (`DRUUMEN_SESSIONS_DB_STORE_PREVIEW=0|false`) suppresses
   // the human-readable preview but NOT the fingerprint: identity
@@ -207,11 +239,14 @@ async function main() {
       promptFingerprint,
       recordTargetOpts,
     });
-    if (promoted) {
+    if (promoted.ok) {
       // Only drop the staged record once the event is durable. If the write
       // failed we deliberately keep the pending file so the NEXT prompt gets
       // another chance at promotion with the correct `created_at`.
       deletePending(claudeSessionId, recordTargetOpts);
+      if (promoted.stableId) {
+        await harvestFromTranscript({ stableId: promoted.stableId, transcriptPath, recordTargetOpts });
+      }
       process.exit(0);
     }
     // Promotion failed (lock timeout, disk). Fall through: the path below
@@ -264,7 +299,12 @@ async function main() {
   // documented degradation, and it is worth vastly more than losing the
   // session.
   if (!known) {
-    await recordFirstPrompt({
+    // Harvest here too, on the stable_id the record just got. A session
+    // reaching this path is usually brand new (nothing to harvest yet, and
+    // `harvestFromTranscript` no-ops), but the documented ways in include a RESUMED
+    // session whose staged record was reclaimed after 24 h — and that one's
+    // transcript is already full of names.
+    const minted = await recordFirstPrompt({
       claudeSessionId,
       pending: null,
       cwd,
@@ -273,6 +313,9 @@ async function main() {
       promptFingerprint,
       recordTargetOpts,
     });
+    if (minted.ok && minted.stableId) {
+      await harvestFromTranscript({ stableId: minted.stableId, transcriptPath, recordTargetOpts });
+    }
     process.exit(0);
   }
 
@@ -305,6 +348,14 @@ async function main() {
     // means a projection failure still leaves a durable event for rebuild.
   }
 
+  // (10) Name harvest. THIS is the call that makes a title reach the database
+  // without the session ever being resumed: Claude Code emits `ai-title` after
+  // the first exchange, i.e. always AFTER the SessionStart hook that used to
+  // be the only collector. From the second prompt onward the tail window holds
+  // it. Deliberately after the heartbeat write — a harvest failure must never
+  // cost us the progress event, which is the reason this hook exists.
+  await harvestFromTranscript({ stableId: known.stableId, transcriptPath, recordTargetOpts });
+
   process.exit(0);
 }
 
@@ -331,7 +382,8 @@ async function main() {
  * (resume race), the csid index resolves to the existing stable_id and this
  * write merges into it instead of splitting identity.
  *
- * @returns {Promise<boolean>} true when the event is durable
+ * @returns {Promise<{ok: boolean, stableId: (string|null)}>} `ok` is true when
+ *   the event is durable; `stableId` is the id it resolved to (null on failure).
  */
 async function recordFirstPrompt({
   claudeSessionId,
@@ -382,8 +434,11 @@ async function recordFirstPrompt({
         branch_current: gitCtx.branch ?? pending?.branch_at_start ?? null,
         head_last_seen: gitCtx.head ?? pending?.head_at_start ?? null,
         worktree_path_observed: gitCtx.worktreePath || pending?.worktree_path_observed || cwd,
-        // No transcript was read — an explicit null keeps the reducer from
-        // pushing an entry into transcript_files[].
+        // This write indexes no transcript file — an explicit null keeps the
+        // reducer from pushing an entry into transcript_files[]. The name
+        // harvest that runs after it opens the transcript read-only and does
+        // not claim it either; indexing is SessionStart's job, and doing it
+        // from two places is how transcript_files[] got polluted before.
         transcript_file: null,
         fingerprints,
         first_prompt_preview: firstPromptPreview,
@@ -391,9 +446,14 @@ async function recordFirstPrompt({
         ...(pending ? { promoted_from_pending: true } : { minted_from_prompt: true }),
       }),
     });
-    return !!(result && result.ok);
+    // `{ ok, stableId }` rather than a bare boolean: the caller harvests the
+    // session's names right after this, and that needs the id this write
+    // resolved to. `stableId` is null on failure and on any older
+    // `recordSessionSeen` result that does not carry one — callers must treat
+    // a missing id as "nothing to harvest", never as an error.
+    return { ok: !!(result && result.ok), stableId: (result && result.stableId) || null };
   } catch {
-    return false;
+    return { ok: false, stableId: null };
   }
 }
 
