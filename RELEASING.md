@@ -38,9 +38,18 @@ Pre-flight items that must be true before tagging:
 
 - `package.json` `version` matches the tag (no `-dev` suffix).
 - `CHANGELOG.md` has a section for this version with a real date (not "TBD").
-- `npm pack --dry-run` output reviewed (under 200 KB / 70 files; only
-  `lib/`, `cli/`, `types/`, `LICENSE`, `NOTICE`, `README.md`,
-  `CHANGELOG.md`, `package.json`).
+- `npm pack --dry-run` output reviewed. What the review is FOR: nothing but
+  `lib/`, `cli/`, `types/`, `LICENSE`, `NOTICE`, `README.md`, `CHANGELOG.md`,
+  `package.json` — no tests, no fixtures, no scratch files — and no size jump
+  you cannot name a cause for.
+
+  The absolute ceiling this line used to state ("under 200 KB / 70 files") had
+  been false for at least a release before anyone read it again: measured
+  2026-09-07, **0.3.0 packs at 270.2 kB / 67 files** and 0.4.0 at
+  **289.4 kB / 72 files** (+5 files, all of them the new `harvest` / `pr-links`
+  modules and their type mirrors). A threshold that the current release already
+  violates does not gate anything; compare against the previous release's
+  numbers instead, and update them here when you tag.
 - No uncommitted local changes (`git status` clean).
 - **Protected refs audit** — GitLab tinfant project must have all of:
   - `master` branch (push + merge: Maintainers)
