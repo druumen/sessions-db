@@ -57,6 +57,20 @@
  * `lib/harvest-names.mjs` for why collecting only at SessionStart left 42%
  * of records unnamed.
  *
+ * RAM, measured the same day with `/usr/bin/time -l` on this hook end to end
+ * (3 runs each, isolated fixture workspace, maximum resident set size):
+ *
+ *   bare `node -e ''` ........................ 38.0 MB
+ *   hook with the harvest mutated out ........ 51.4-51.9 MB
+ *   hook + harvest, 41.2 MB transcript ....... 52.8-53.1 MB
+ *   hook + harvest, 277 byte transcript ...... 51.7-51.9 MB
+ *
+ * The harvest costs ~1.3 MB of peak RSS, and the last row is why that number
+ * is the WINDOW rather than the file: a transcript ~150000x smaller lands
+ * inside the no-harvest range, while the 41 MB one does not grow past the
+ * window either. It is also transient — this hook is a per-prompt process
+ * that exits; nothing stays resident between turns.
+ *
  * Copying SessionStart's six probes would have spent more than half the
  * budget re-measuring facts that cannot change mid-session (worktree
  * realpath, git common dir, dev-offload registry name). So this hook probes
