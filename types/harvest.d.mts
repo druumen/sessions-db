@@ -25,8 +25,67 @@
  * comparison a mismatch. The measured ceiling on this machine is 62
  * characters against a 512-character cap, so this path is defensive, not hot.
  */
-export function harvestFromTranscript({ stableId, transcriptPath, recordTargetOpts }: {
+export function harvestFromTranscript({ stableId, transcriptPath, recordTargetOpts, dryRun }: {
     stableId: any;
     transcriptPath: any;
     recordTargetOpts: any;
-}): Promise<void>;
+    dryRun?: boolean;
+}): Promise<any[]>;
+/**
+ * `sessions-db harvest` — backfill: run the same harvest over transcripts that
+ * are already on disk.
+ *
+ * ## Why a backfill exists at all
+ *
+ * The hooks only ever see sessions that are still being used. Everything
+ * recorded before the harvest ran on every prompt — 289 of 688 records (42%)
+ * on the reference machine — has a transcript carrying a title and a
+ * projection carrying nothing, and no hook will ever fire for it again. That
+ * gap does not close on its own.
+ *
+ * ## Which transcript
+ *
+ * By `claude_session_ids` → `findTranscriptByCsid`, an EXACT filename match,
+ * not `transcript_files[]`. Measured on the reference machine, 357 of 507
+ * entries in that array (70%) name a file that matches none of their record's
+ * claude_session_ids; harvesting through it would attribute one session's
+ * name to another, and a backfill that mislabels is worse than a gap.
+ *
+ * Dry run by default is deliberate — same posture as `prune`. This one is not
+ * destructive, but it writes a few hundred events into an append-only log,
+ * and "let me see it first" is the reasonable default for that.
+ *
+ * Cost is dominated by one `loadProjection` per session inside
+ * `harvestFromTranscript` rather than by the transcript reads: measured
+ * 1.9 s over 688 records on the reference machine, which is cheap enough that
+ * keeping ONE harvest implementation beats optimising the once-a-lifetime
+ * path into a second one.
+ *
+ * @param {{root?: string, rootPath?: string, paths?: object, dryRun?: boolean,
+ *   limit?: number, all?: boolean}} [opts]
+ *   `all: true` visits every session; the default visits only those still
+ *   missing a harvested name or a link, which is the population it is for.
+ * @returns {Promise<{ok: boolean, dryRun: boolean, scanned: number,
+ *   withTranscript: number, changed: number, events: number,
+ *   sessions: Array<{stable_id: string, transcript: string, ops: string[]}>}>}
+ */
+export function runHarvest(opts?: {
+    root?: string;
+    rootPath?: string;
+    paths?: object;
+    dryRun?: boolean;
+    limit?: number;
+    all?: boolean;
+}): Promise<{
+    ok: boolean;
+    dryRun: boolean;
+    scanned: number;
+    withTranscript: number;
+    changed: number;
+    events: number;
+    sessions: Array<{
+        stable_id: string;
+        transcript: string;
+        ops: string[];
+    }>;
+}>;
