@@ -54,7 +54,7 @@
  * transcript (41.2 MB, 5 runs): the window is fixed, so file size does not
  * enter it — that number is the ceiling, not an average. It buys the
  * database the session's current title without a resume; see
- * `lib/harvest-names.mjs` for why collecting only at SessionStart left 42%
+ * `lib/harvest.mjs` for why collecting only at SessionStart left 42%
  * of records unnamed.
  *
  * RAM, measured the same day with `/usr/bin/time -l` on this hook end to end
@@ -81,13 +81,13 @@
  * text directly, which is both cheaper and more correct than waiting for
  * Claude Code to flush it. The transcript is opened for exactly one other
  * purpose — the 256 KiB tail scan that harvests the session's current name
- * (`lib/harvest-names.mjs`), which has no payload equivalent.
+ * (`lib/harvest.mjs`), which has no payload equivalent.
  */
 
 import { createHash } from 'node:crypto';
 
 import { gitContextFast } from '../lib/git-context.mjs';
-import { harvestNames } from '../lib/harvest-names.mjs';
+import { harvestFromTranscript } from '../lib/harvest.mjs';
 import {
   hasInitializedStorage,
   isDruumenWorkspace,
@@ -147,7 +147,7 @@ async function main() {
   // (4a) transcript_path — OPTIONAL, and only ever used for name harvesting.
   // Nothing downstream may become conditional on it: an older Claude Code
   // that omits the field, or a payload we could not parse, must still get the
-  // heartbeat. `harvestNames` no-ops on a null/missing path.
+  // heartbeat. `harvestFromTranscript` no-ops on a null/missing path.
   const transcriptPath = pickString(input?.transcript_path) || null;
 
   // (5) git context — ONE spawn (see the budget note in the file header).
@@ -245,7 +245,7 @@ async function main() {
       // another chance at promotion with the correct `created_at`.
       deletePending(claudeSessionId, recordTargetOpts);
       if (promoted.stableId) {
-        await harvestNames({ stableId: promoted.stableId, transcriptPath, recordTargetOpts });
+        await harvestFromTranscript({ stableId: promoted.stableId, transcriptPath, recordTargetOpts });
       }
       process.exit(0);
     }
@@ -301,7 +301,7 @@ async function main() {
   if (!known) {
     // Harvest here too, on the stable_id the record just got. A session
     // reaching this path is usually brand new (nothing to harvest yet, and
-    // `harvestNames` no-ops), but the documented ways in include a RESUMED
+    // `harvestFromTranscript` no-ops), but the documented ways in include a RESUMED
     // session whose staged record was reclaimed after 24 h — and that one's
     // transcript is already full of names.
     const minted = await recordFirstPrompt({
@@ -314,7 +314,7 @@ async function main() {
       recordTargetOpts,
     });
     if (minted.ok && minted.stableId) {
-      await harvestNames({ stableId: minted.stableId, transcriptPath, recordTargetOpts });
+      await harvestFromTranscript({ stableId: minted.stableId, transcriptPath, recordTargetOpts });
     }
     process.exit(0);
   }
@@ -354,7 +354,7 @@ async function main() {
   // be the only collector. From the second prompt onward the tail window holds
   // it. Deliberately after the heartbeat write — a harvest failure must never
   // cost us the progress event, which is the reason this hook exists.
-  await harvestNames({ stableId: known.stableId, transcriptPath, recordTargetOpts });
+  await harvestFromTranscript({ stableId: known.stableId, transcriptPath, recordTargetOpts });
 
   process.exit(0);
 }

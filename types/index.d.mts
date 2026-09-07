@@ -9,6 +9,7 @@ export { computeSweepTransitions, computeEffectiveLastProgress } from "./sweep.m
 export { runPrune, computePruneCandidates, hasTranscriptOnDisk, assessScanTrust, parseDuration, DEFAULT_OLDER_THAN_MS } from "./prune.mjs";
 export { pendingDir, pendingPath, writePending, readPending, deletePending, listPending, sweepPending, markPromoterAlive, isPromoterAlive, PENDING_DIRNAME, PENDING_MAX_AGE_MS, PROMOTER_MARKER, PROMOTER_MAX_AGE_MS, PROMOTER_STALE_AFTER_MS, PROMOTER_BACKLOG_MIN_COUNT, PROMOTER_BACKLOG_MIN_AGE_MS } from "./pending.mjs";
 export { workspaceHashFromCwd, listTranscriptFiles, findTranscriptByCsid, indexTranscriptCsids, extractLatestTitles } from "./transcript.mjs";
+export { MAX_PR_LINKS_PER_SESSION, applyPrLinkToSession, formatPrLink, prLinkFromEvent, prLinkKey, prLinkSeenPayload, sessionMatchesPrQuery } from "./pr-links.mjs";
 export { sanitizeFirstPrompt, sanitizeNameValue, stripIdeWrappers, stripSystemReminders } from "./sanitize.mjs";
 export { generateSessionId, isSessionId, extractTimestamp } from "./uuid.mjs";
 export { applyEvent, emptyProjection, emptySession, rebuildFromEvents } from "./projection.mjs";

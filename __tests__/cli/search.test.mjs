@@ -137,3 +137,48 @@ describe('search — discoverTranscriptPaths (disk fallback)', () => {
     assert.deepEqual(await discoverTranscriptPaths(session, makeDiskCache()), []);
   });
 });
+
+/**
+ * MR search. The number semantics are deliberately NOT substring — see the
+ * comment in `matchSessionMetadata` — so both directions are pinned here.
+ */
+describe('search — merge request links', () => {
+  const REPO = 'druumen/cn/drummen';
+  const link = (n) => ({
+    repository: REPO,
+    number: n,
+    url: `https://gitlab.tinfant.org/${REPO}/-/merge_requests/${n}`,
+    first_seen_at: '2026-09-07T16:04:20.294Z',
+  });
+  const proj = () => mkProjection([
+    mkSession(SID_A, { pr_links: [link(722)] }),
+    mkSession(SID_B, { pr_links: [link(672), link(99)] }),
+    mkSession(SID_C, { alias: 'no MRs here' }),
+  ]);
+
+  it('finds the session that opened an MR, by the forms a person types', () => {
+    for (const q of ['722', '#722', '!722']) {
+      const r = searchByMetadata(proj(), q);
+      assert.deepEqual(r.map((x) => x.session.stable_id), [SID_A], `query ${q}`);
+      assert.deepEqual(r[0].matched_in, ['pr']);
+    }
+  });
+
+  it('does not widen a number query into a prefix match', () => {
+    // `72` is a prefix of 722 and a substring of the url; neither may match.
+    assert.deepEqual(searchByMetadata(proj(), '72').map((x) => x.session.stable_id), []);
+    // Control: the sessions ARE findable, so the empty result above is the
+    // rule at work rather than a broken fixture.
+    assert.deepEqual(searchByMetadata(proj(), '99').map((x) => x.session.stable_id), [SID_B]);
+  });
+
+  it('matches the repository and the url by substring, and misses sessions with no links', () => {
+    assert.deepEqual(
+      searchByMetadata(proj(), 'druumen/cn').map((x) => x.session.stable_id).sort(),
+      [SID_A, SID_B].sort(),
+    );
+    assert.deepEqual(searchByMetadata(proj(), 'gitlab.tinfant.org').map((x) => x.session.stable_id).sort(),
+      [SID_A, SID_B].sort());
+    assert.equal(searchByMetadata(proj(), 'druumen/cn').some((x) => x.session.stable_id === SID_C), false);
+  });
+});

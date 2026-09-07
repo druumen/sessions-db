@@ -1245,6 +1245,62 @@ describe('UserPromptSubmit hook — name harvesting', () => {
     }
   });
 
+  // pr-link rides the same scan as the names. The assertion that matters is
+  // not "it was collected" but "it was collected without a second read and
+  // without a second event per turn".
+  it('an MR opened mid-session lands in the db, and its re-emissions append nothing', async () => {
+    const ws = makeFakeWorkspace({ prefix: 'prompt-harvest-pr-' });
+    try {
+      const transcript = makeFakeTranscript(ws, HARVEST_SID);
+      await prompt(ws, transcript, 'turn 1');
+      const prEvents = () => readEvents(ws).filter((e) => e.op === 'pr_link_seen');
+      assert.equal(prEvents().length, 0, 'no MR yet — control for the assertion below');
+
+      const link = (ts) => appendRecord(transcript, {
+        type: 'pr-link',
+        sessionId: HARVEST_SID,
+        prNumber: 722,
+        prUrl: 'https://gitlab.tinfant.org/druumen/cn/drummen/-/merge_requests/722',
+        prRepository: 'druumen/cn/drummen',
+        timestamp: ts,
+      });
+
+      link('2026-09-07T16:04:20.294Z');
+      await prompt(ws, transcript, 'turn 2');
+
+      const session = onlySession(ws);
+      assert.deepEqual(session.pr_links, [{
+        repository: 'druumen/cn/drummen',
+        number: 722,
+        url: 'https://gitlab.tinfant.org/druumen/cn/drummen/-/merge_requests/722',
+        first_seen_at: '2026-09-07T16:04:20.294Z',
+      }]);
+      assert.equal(prEvents().length, 1);
+
+      // Claude Code re-emits the record constantly (160 copies in one real
+      // transcript). Two more turns must not add two more events.
+      link('2026-09-07T16:19:11.041Z');
+      await prompt(ws, transcript, 'turn 3');
+      link('2026-09-07T16:21:06.763Z');
+      await prompt(ws, transcript, 'turn 4');
+      assert.equal(prEvents().length, 1, 'unchanged link must not append per turn');
+      assert.equal(onlySession(ws).pr_links[0].first_seen_at, '2026-09-07T16:04:20.294Z',
+        'and the earliest observation is still the one stored');
+
+      // A SECOND MR is a new fact and must land.
+      appendRecord(transcript, {
+        type: 'pr-link', sessionId: HARVEST_SID, prNumber: 723,
+        prUrl: 'https://gitlab.tinfant.org/druumen/cn/drummen/-/merge_requests/723',
+        prRepository: 'druumen/cn/drummen', timestamp: '2026-09-07T17:00:00.000Z',
+      });
+      await prompt(ws, transcript, 'turn 5');
+      assert.deepEqual(onlySession(ws).pr_links.map((l) => l.number), [722, 723]);
+      assert.equal(prEvents().length, 2);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
   // The promotion path. Defensive rather than everyday: a session staged by
   // SessionStart normally has no name yet when its first prompt promotes it.
   // The branch exists so that when a name IS already there the record does not

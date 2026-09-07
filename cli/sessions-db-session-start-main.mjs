@@ -52,7 +52,7 @@ import {
 } from '../lib/transcript.mjs';
 import { sanitizeFirstPrompt } from '../lib/sanitize.mjs';
 import { loadProjection, recordSessionSeen } from '../lib/storage.mjs';
-import { harvestNames } from '../lib/harvest-names.mjs';
+import { harvestFromTranscript } from '../lib/harvest.mjs';
 import { gitContext } from '../lib/git-context.mjs';
 import { isPromoterAlive, sweepPending, writePending } from '../lib/pending.mjs';
 import {
@@ -326,7 +326,7 @@ async function main() {
   // rebuild could remove, because the duplicate event is in the log forever.
   if (recordResult && recordResult.ok && typeof recordResult.stableId === 'string') {
     try {
-      await harvestNames({
+      await harvestFromTranscript({
         stableId: recordResult.stableId,
         transcriptPath,
         recordTargetOpts,

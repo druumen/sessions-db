@@ -29,6 +29,7 @@
  *              claude_session_ids, matched_in, snippet, name_hits }
  */
 
+import { formatPrLink } from '../lib/pr-links.mjs';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
@@ -372,6 +373,11 @@ export async function run(argv) {
           activity_state: r.session.activity_state ?? null,
           last_progress_at: r.session.last_progress_at ?? null,
           claude_session_ids: r.session.claude_session_ids ?? [],
+          // MRs this session opened. Present as [] rather than omitted so a
+          // consumer can tell "none" from "this row was written by a version
+          // that did not know about them" — the same reason every other list
+          // field here has a `?? []`.
+          pr_links: r.session.pr_links ?? [],
           matched_in: r.matched_in,
           snippet: r.snippet,
           name_hits: r.name_hits ?? [],
@@ -411,6 +417,11 @@ function formatSearchList(results, { wantContent } = {}) {
       const when = hit.set_at ? `, set ${hit.set_at}` : '';
       lines.push(`    name [${hit.kind}] ${hit.channel}${when}: ${hit.value}`);
     }
+    // MRs the session opened. Printed for every result, not only for `pr`
+    // hits: when you have found the session you almost always want the number,
+    // and it is one short line.
+    const links = Array.isArray(r.session.pr_links) ? r.session.pr_links : [];
+    if (links.length > 0) lines.push(`    mr: ${links.map(formatPrLink).join(' ')}`);
     if (r.snippet) lines.push(`    … ${r.snippet}`);
   }
   return lines.join('\n') + '\n';
