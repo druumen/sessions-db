@@ -290,6 +290,128 @@ describe('sessions-db search — names', () => {
   });
 });
 
+/**
+ * The names a result row's single display label hides.
+ *
+ * SID_RENAMED is the shape from the field: a hand-typed `cc_custom_title`
+ * outranks the model's `cc_ai_title`, so the title the user reads off their own
+ * Claude Code tab is invisible on the row. Measured on the reference database
+ * 2026-09-08: 486 of 688 sessions carry a `cc_ai_title` and 32 of those are
+ * outranked like this.
+ *
+ * Every assertion here is on a lookup that matched NO name (the session's UUID)
+ * — which is also what keeps this independent of `name_hits`: that field
+ * answers "which name caused the hit" and is correctly empty for a UUID query,
+ * so it cannot be the thing carrying these names.
+ */
+describe('sessions-db search — the names the display hides', () => {
+  const UUID_RENAMED = '11111111-1111-4111-8111-111111111111';
+
+  it('--json carries every current name, including the outranked one', async () => {
+    const root = plantWorkspace();
+    try {
+      const r = await runCLI(['search', UUID_RENAMED, '--root', root, '--json']);
+      assert.equal(r.exitCode, 0, r.stderr);
+      const out = JSON.parse(r.stdout);
+      assert.deepEqual(out.map((x) => x.stable_id), [SID_RENAMED]);
+
+      // The hit came from the id, so no name caused it...
+      assert.deepEqual(out[0].matched_in, ['claude_session_id']);
+      assert.deepEqual(out[0].name_hits, []);
+      // ...and the names are reported anyway. Both channels, with the one the
+      // display chain dropped.
+      assert.deepEqual(
+        out[0].names.map((n) => [n.channel, n.value]).sort(),
+        [['cc_ai_title', NEW_TITLE], ['cc_custom_title', 'spine work']].sort(),
+      );
+      assert.equal(out[0].display_name, 'spine work');
+      assert.equal(out[0].display_name_channel, 'cc_custom_title');
+      // The provenance a caller needs to trust an entry travels with it.
+      const ai = out[0].names.find((n) => n.channel === 'cc_ai_title');
+      assert.equal(ai.source, 'llm');
+      assert.equal(ai.set_at, '2026-06-05T22:16:34.913Z');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('the human output prints the outranked name, labelled with its channel', async () => {
+    const root = plantWorkspace();
+    try {
+      const r = await runCLI(['search', UUID_RENAMED, '--root', root]);
+      assert.equal(r.exitCode, 0, r.stderr);
+      assert.match(r.stdout, /^ {4}also cc_ai_title: Analyze Knowledge Spine/m);
+      // The headline still shows the display name — this ADDS a line, it does
+      // not change which name the row is titled by.
+      assert.match(r.stdout, /spine work/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('adds nothing to a row whose display name is its only name', async () => {
+    // The other half of the claim: 656 of those 688 rows must come out byte
+    // for byte as before. SID_STABLE holds one name and it is the one shown.
+    const root = plantWorkspace();
+    try {
+      const r = await runCLI([
+        'search', '22222222-2222-4222-8222-222222222222', '--root', root,
+      ]);
+      assert.equal(r.exitCode, 0, r.stderr);
+      // Positive control: the row IS here, so the absence below is the rule
+      // at work rather than an empty result set.
+      assert.match(r.stdout, /Fix HTTP 400/);
+      assert.equal(/^ {4}also /m.test(r.stdout), false, r.stdout);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not print a name twice because a mirror channel repeats it', async () => {
+    // `agent_name` mirrors `cc_ai_title` — on the reference database all 3
+    // agent-badged sessions whose badge differed from the display name held a
+    // badge byte-identical to their ai title. Deduping by channel instead of
+    // by value would print the same string under two labels.
+    const SID_BADGE = 'sess_99999999-7777-7000-8000-000000000008';
+    const root = mkTmp();
+    const dir = join(root, 'tickets/_logs');
+    mkdirSync(dir, { recursive: true });
+    const TS = '2026-06-01T10:00:00.000Z';
+    const events = [
+      ev('session_seen', SID_BADGE, { claude_session_id: '88888888-8888-4888-8888-888888888888' }, TS),
+      ev('name_set', SID_BADGE, { channel: 'cc_ai_title', value: 'badge twin', source: 'llm' }, TS),
+      ev('name_set', SID_BADGE, { channel: 'agent_name', value: 'badge twin', source: 'harvest' }, TS),
+      ev('alias_set', SID_BADGE, { alias: 'pinned by hand' }, TS),
+    ];
+    writeFileSync(
+      join(dir, 'sessions-db-events.jsonl'),
+      events.map((e) => JSON.stringify(e)).join('\n') + '\n',
+    );
+    try {
+      const r = await runCLI(['search', '88888888-8888-4888-8888-888888888888', '--root', root]);
+      assert.equal(r.exitCode, 0, r.stderr);
+      const also = r.stdout.split('\n').filter((l) => l.startsWith('    also '));
+      assert.deepEqual(also, ['    also cc_ai_title: badge twin'], r.stdout);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not repeat a name the `name` lines already spelled out', async () => {
+    // Searching the outranked title makes it a `name [current]` hit AND an
+    // outranked name. It is one string and belongs on screen once.
+    const root = plantWorkspace();
+    try {
+      const r = await runCLI(['search', 'Analyze Knowledge Spine', '--root', root]);
+      assert.equal(r.exitCode, 0, r.stderr);
+      assert.match(r.stdout, /^ {4}name \[current\] cc_ai_title.*Analyze Knowledge Spine/m);
+      assert.equal(/^ {4}also /m.test(r.stdout), false, r.stdout);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('sessions-db search — a projection cache written before names[]', () => {
   /**
    * Plant a 0.2.0-shaped cache: `ai_title` present, no `names`, no
@@ -337,6 +459,29 @@ describe('sessions-db search — a projection cache written before names[]', () 
       // dressed up as a new feature.
       assert.equal(out[0].display_name, OLD_TITLE);
       assert.equal(out[0].display_name_channel, 'cc_ai_title');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reports no `names` entries rather than inventing them from the mirrors', async () => {
+    // The boundary of the field, pinned rather than left to be discovered: it
+    // is what the record STORES. This cache's name lives in the legacy
+    // `ai_title` mirror, which carries no `set_at` / `source` — synthesising
+    // an entry would make a derived guess indistinguishable from a recorded
+    // fact, so the array stays empty and `display_name` (asserted above)
+    // remains the way to read the name off such a row. A `rebuild` fills it in
+    // from the log.
+    const root = plantLegacyCache();
+    try {
+      const r = await runCLI(['search', 'HTTP 400', '--root', root, '--json']);
+      assert.equal(r.exitCode, 0, r.stderr);
+      const out = JSON.parse(r.stdout);
+      assert.deepEqual(out[0].names, []);
+      // The human line follows the display map, not the stored array, so it
+      // still has nothing to add here: the mirrored name IS the display name.
+      const human = await runCLI(['search', 'HTTP 400', '--root', root]);
+      assert.equal(/^ {4}also /m.test(human.stdout), false, human.stdout);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

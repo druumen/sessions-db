@@ -1,4 +1,26 @@
 /**
+ * The session's current names, one entry per DISTINCT value.
+ *
+ * Channels are visited in registry order (`sortChannels`) and the first one
+ * holding a given string wins it. That is not cosmetic dedup: `agent_name` is
+ * documented as a mirror of `ai_title` — on the reference machine every
+ * session carrying an agent badge had the two byte-identical — so without
+ * this, every such session answers a search with two `matched_in` labels and
+ * two `name_hits` for one name, and a caller counting hits counts the same
+ * name twice. Registry order also makes the surviving label the meaningful
+ * one (`cc_ai_title` over `agent_name`) rather than whichever the object key
+ * order happened to yield.
+ *
+ * Exported because `cli/search.mjs` renders the same deduped view (the names
+ * a result row's single display label hides). Re-deriving it there would put a
+ * second copy of the mirror rule in the tree, and the two would eventually
+ * disagree about which channel owns a value — the same way `find` and the
+ * cockpit panel once disagreed about what a session is called.
+ *
+ * @returns {Array<[string, string]>} [channel, value] pairs, deduped by value
+ */
+export function distinctCurrentNames(session: any): Array<[string, string]>;
+/**
  * Labelled metadata strings a session exposes to search. Skips empty values.
  *
  * The two name-bearing fields go through `sanitizeNameValue` first. These are
