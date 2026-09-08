@@ -103,9 +103,29 @@ export async function run(argv) {
     ...(parsed.flags['--codex-root'] ? { codexRoot: parsed.flags['--codex-root'] } : {}),
   });
 
-  if (parsed.flags['--quiet'] === true) return;
+  // A refusal and a failed write both have to reach the exit code, not just
+  // the text: this command is run from scripts.
+  if (result.refused === 'workspace_mismatch') {
+    if (parsed.flags['--json'] === true) process.stdout.write(formatJSON(result));
+    else if (parsed.flags['--quiet'] !== true) {
+      process.stderr.write(
+        `error: refusing — you are standing in ${result.workspaceRoot}\n` +
+        `  but the database resolves to the workspace ${result.dbWorkspace}.\n` +
+        '  Gate 2 is anchored on the database, so this run would have ingested\n' +
+        '  nothing; refusing loudly instead of reporting an empty corpus.\n' +
+        '  Run it from that workspace, or drop --root / DRUUMEN_SESSIONS_DB_ROOT.\n',
+      );
+    }
+    process.exit(1);
+  }
+
+  if (parsed.flags['--quiet'] === true) {
+    if (result.failed > 0) process.exit(1);
+    return;
+  }
   if (parsed.flags['--json'] === true) {
     process.stdout.write(formatJSON(result));
+    if (result.failed > 0) process.exit(1);
     return;
   }
 
@@ -125,6 +145,12 @@ export async function run(argv) {
     lines.push(`  ${s.codex_session_id.slice(0, 8)}  ${when}${who}  ${preview}`);
   }
   if (result.sessions.length > 20) lines.push(`  … and ${result.sessions.length - 20} more`);
+  if (result.failed > 0) {
+    lines.push(`  ⚠ ${result.failed} write(s) FAILED — those sessions are not in the database.`);
+    const firstErr = result.sessions.find((s) => s.error);
+    if (firstErr) lines.push(`    first error: ${firstErr.error}`);
+  }
   if (result.dryRun && result.ingested > 0) lines.push('Run again with --yes to write.');
   process.stdout.write(lines.join('\n') + '\n');
+  if (result.failed > 0) process.exit(1);
 }

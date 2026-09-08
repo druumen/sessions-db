@@ -1,4 +1,24 @@
 /**
+ * The workspace that owns a database, derived from where the database
+ * actually resolves to — the same resolver the writer uses, so the gate and
+ * the write can never disagree about which workspace is in play.
+ *
+ * Layouts, both of which this repo writes:
+ *   <workspace>/.dru-code/sessions-db.json      → workspace = dirname
+ *   <workspace>/tickets/_logs/sessions-db.json  → workspace = dirname(dirname)
+ * Anything else (a bare directory handed in by a test or an operator) is
+ * treated as its own workspace root — conservative: it gates on exactly the
+ * directory the data lands in.
+ *
+ * @param {{root?: string, rootPath?: string, paths?: object}} storage
+ * @returns {string}
+ */
+export function storageWorkspaceRoot(storage?: {
+    root?: string;
+    rootPath?: string;
+    paths?: object;
+}): string;
+/**
  * Is `child` the same path as `parent` or inside it?
  *
  * String prefix with an explicit separator, not `startsWith(parent)`:
