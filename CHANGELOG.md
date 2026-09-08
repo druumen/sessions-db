@@ -36,6 +36,16 @@ it, so "which MR came out of this session" had no answer on the database side.
   `--yes` writes. Resolves each transcript by `claude_session_id`, never
   through `transcript_files[]` (70% of whose entries name a file belonging to
   no claude_session_id of their record).
+- **`names[]` on a `search --json` row, and an `also <channel>:` line in the
+  human output** — the names the display chain outranks. A result row shows one
+  name by construction, so looking a session up by UUID / branch / cwd could not
+  tell you the title on the user's own Claude Code tab. Measured on the 688-record
+  reference database: 486 sessions carry a `cc_ai_title` and **32 of them have it
+  outranked** by an `alias` or a hand-typed `cc_custom_title`. Over all 688 rows
+  the human output gains exactly those 32 lines and changes nothing else.
+  `name_hits` is untouched: it answers "which name caused this hit", so a UUID
+  query still reports none — the two fields are independent, and each has a test
+  that survives the other being emptied.
 
 ### Changed
 
