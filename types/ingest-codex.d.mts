@@ -24,7 +24,7 @@ export function storageWorkspaceRoot(storage?: {
  * String prefix with an explicit separator, not `startsWith(parent)`:
  * `/a/workspace-old` starts with `/a/workspace` and is a DIFFERENT directory.
  */
-export function isInside(parent: any, child: any): any;
+export function isInside(parent: any, child: any): boolean;
 /**
  * @param {{workspaceRoot: string, storage?: object, dryRun?: boolean,
  *   limit?: number, codexRoot?: string, now?: string}} opts

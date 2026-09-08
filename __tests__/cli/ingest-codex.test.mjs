@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -13,7 +13,12 @@ import { loadProjection } from '../../lib/storage.mjs';
 const CODEX_ID = '01a07d1a-4180-7ab3-be8c-336dc7f2bab3';
 const CODEX_ID_2 = '01a07d1a-4180-7ab3-be8c-336dc7f2bac4';
 
-const mkTmp = (p = 'ingest-codex-') => mkdtempSync(join(tmpdir(), p));
+// `realpathSync`, deliberately: macOS hands out `/var/folders/...` from
+// `os.tmpdir()` while a process started there reports `/private/var/...`.
+// Production normalises both sides of gate 2 for exactly this reason (a
+// symlinked checkout does the same thing to a real user), so a fixture that
+// kept the un-resolved spelling would be testing a world the CLI never sees.
+const mkTmp = (p = 'ingest-codex-') => realpathSync(mkdtempSync(join(tmpdir(), p)));
 
 /** A directory that passes `isDruumenWorkspace` (CLAUDE.md sentinel). */
 function mkWorkspace(prefix = 'ws-') {
@@ -460,27 +465,160 @@ describe('ingest-codex — a failed write is not a registration', () => {
       const first = await runIngestCodex({ workspaceRoot: ws, storage: { root: ws }, codexRoot, dryRun: false });
       assert.equal(first.ingested, 1, 'control: writing works before the sabotage');
 
-      // Now make the append-only log read-only: `appendEvent` fails with
-      // EACCES, `tryUpdateProjection` returns {ok:false} WITHOUT throwing —
-      // exactly the shape that used to print "Registered 1" with nothing in
-      // the database.
-      chmodSync(eventsPath(ws), 0o444);
+      // Now break the append: replace the log with a DIRECTORY, so
+      // `appendEvent` fails EISDIR and `tryUpdateProjection` returns
+      // {ok:false} WITHOUT throwing — the shape that used to print
+      // "Registered 1" with nothing in the database.
+      //
+      // ⚠ The first version used `chmod 0444` and **passed locally while
+      // failing in CI**: the CI image runs as root, and root's
+      // CAP_DAC_OVERRIDE ignores permission bits, so the write succeeded and
+      // the assertion `failed === 1` was false. Review reproduced it on the
+      // same image digest with only the uid changed (root: 1 fail;
+      // --user 1000:1000: green). EISDIR is uid-independent.
+      //
+      // The projection cache already exists from the run above, so
+      // `loadProjection` does not need to re-read the events file — the
+      // failure lands on the WRITE, which is what this test is about.
+      rmSync(eventsPath(ws));
+      mkdirSync(eventsPath(ws));
       plantRollout(codexRoot, { cwd: ws, id: CODEX_ID_2 });
 
       const r = await runIngestCodex({ workspaceRoot: ws, storage: { root: ws }, codexRoot, dryRun: false });
-      chmodSync(eventsPath(ws), 0o644);
+      rmSync(eventsPath(ws), { recursive: true });
       assert.equal(r.ingested, 0, 'a write that did not land is not a registration');
       assert.equal(r.failed, 1);
       assert.equal(r.ok, false);
       assert.ok(r.sessions[0].error, 'the record carries why');
 
-      // Control: with the permission restored the same pending rollout does
-      // register — so the zero above is the failure being counted, not an
-      // exhausted corpus.
+      // Control: with the log restored the same pending rollout does register
+      // — so the zero above is the failure being counted, not an exhausted
+      // corpus.
       const after = await runIngestCodex({ workspaceRoot: ws, storage: { root: ws }, codexRoot, dryRun: false });
       assert.equal(after.ingested, 1);
       assert.equal(after.failed, 0);
       assert.equal(after.ok, true);
+    } finally {
+      for (const d of [ws, codexRoot]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * The end-to-end shape the unit tests could not see.
+ *
+ * Review's finding, and the reason it is a CLI test: the unit tests passed
+ * `storage: {root: ws}` while the CLI, standing in a subdirectory, computed
+ * `{root: <subdirectory>}` — a value the CLI never produces in that scenario.
+ * The gate then vouched for the workspace's real database while the events
+ * landed in a NEW one under the subdirectory: "Registered 1" followed by
+ * `search` finding nothing.
+ *
+ * The acceptance criterion is stated as data, not as a promise: in one run,
+ * the path the gate anchored on and the path events actually land in must be
+ * the same file.
+ */
+describe('ingest-codex — running from a subdirectory (real CLI)', () => {
+  const CLI2 = new URL('../../cli/sessions-db.mjs', import.meta.url).pathname;
+
+  function runCLI2(argv, cwd) {
+    return new Promise((resolve2, reject) => {
+      const child = spawn(process.execPath, [CLI2, ...argv], {
+        cwd, env: { ...process.env, NO_COLOR: '1', DRUUMEN_SESSIONS_DB_ROOT: '' }, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      const out = []; const err = [];
+      child.stdout.on('data', (c) => out.push(c));
+      child.stderr.on('data', (c) => err.push(c));
+      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('CLI hung > 10s')); }, 10000);
+      child.on('error', (e) => { clearTimeout(timer); reject(e); });
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        resolve2({ code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') });
+      });
+    });
+  }
+
+  it('writes into the workspace database, not a new one under the subdirectory', async () => {
+    const ws = mkWorkspace('ws-subdir-');
+    const sub = join(ws, 'products', 'web');
+    mkdirSync(sub, { recursive: true });
+    // An initialized workspace database, the shape a real workspace has.
+    mkdirSync(join(ws, '.dru-code'), { recursive: true });
+    writeFileSync(join(ws, '.dru-code', 'sessions-db.json'),
+      JSON.stringify({ _meta: { schema_version: 2, event_count: 0, last_event_id: null }, sessions: {} }));
+    const codexRoot = mkTmp('codex-root-');
+    try {
+      plantRollout(codexRoot, { cwd: ws });
+
+      const r = await runCLI2(['ingest-codex', '--codex-root', codexRoot, '--yes', '--json'], sub);
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+      const out = JSON.parse(r.stdout);
+
+      assert.equal(out.ingested, 1, 'a rollout from this workspace must still be ingested from a subdirectory');
+      // The acceptance criterion, asserted directly.
+      assert.equal(out.eventsPath, join(ws, '.dru-code', 'sessions-db-events.jsonl'),
+        'the gate and the write must name the same database');
+      assert.equal(existsSync(join(ws, '.dru-code', 'sessions-db-events.jsonl')), true,
+        'and that file is where the events really are');
+      assert.equal(existsSync(join(sub, 'tickets', '_logs')), false,
+        'no second database may appear under the subdirectory');
+    } finally {
+      for (const d of [ws, codexRoot]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * The two resolvers, pinned where they DISAGREE.
+ *
+ * `lib/paths.mjs` ascends to find an existing database; the writer, for
+ * `{root: X}`, writes `X/tickets/_logs/` without ascending. Point storage at a
+ * subdirectory of a workspace that already has a `.dru-code` database and the
+ * two answer differently: the ascending one says "the workspace", the writer
+ * says "under the subdirectory". The gate must follow the writer — otherwise
+ * it vouches for a database this run never touches.
+ *
+ * ⚠ Written after a mutation of mine came back green: reverting
+ * `storageWorkspaceRoot` to `resolve(storage.rootPath || storage.root)` is an
+ * EQUIVALENT transformation, because the basename step below it folds the
+ * answer back. The mutation that discriminates is switching resolvers, and
+ * nothing tested that until this case existed.
+ */
+describe('ingest-codex — the gate follows the writer, not an ascending resolver', () => {
+  it('anchors on the subdirectory database the writer would create, not the workspace one', async () => {
+    const ws = mkWorkspace('ws-disagree-');
+    const sub = join(ws, 'products', 'web');
+    mkdirSync(sub, { recursive: true });
+    mkdirSync(join(ws, '.dru-code'), { recursive: true });
+    writeFileSync(join(ws, '.dru-code', 'sessions-db.json'),
+      JSON.stringify({ _meta: { schema_version: 2, event_count: 0, last_event_id: null }, sessions: {} }));
+    const codexRoot = mkTmp('codex-root-');
+    try {
+      // A rollout belonging to the WORKSPACE.
+      plantRollout(codexRoot, { cwd: ws });
+
+      // Storage pointed at the subdirectory: the writer will create
+      // `sub/tickets/_logs/`, while an ascending resolver would report the
+      // workspace's `.dru-code`.
+      const r = await runIngestCodex({
+        workspaceRoot: sub,
+        storage: { root: sub },
+        codexRoot,
+        dryRun: false,
+      });
+
+      assert.equal(r.eventsPath, join(sub, 'tickets', '_logs', 'sessions-db-events.jsonl'),
+        'the reported database is the one the WRITER would use');
+      assert.equal(r.ingested, 0,
+        "a workspace rollout must not be admitted into a subdirectory's database");
+      assert.equal(r.skippedOtherWorkspace, 1);
+      assert.equal(existsSync(join(ws, '.dru-code', 'sessions-db-events.jsonl')), false,
+        "and the workspace database the ascending resolver would have named stays untouched");
+
+      // Control: the same rollout with storage on the workspace IS admitted —
+      // so the zero above is the anchor, not a rollout that can never land.
+      const ok = await runIngestCodex({ workspaceRoot: ws, storage: { root: ws }, codexRoot, dryRun: false });
+      assert.equal(ok.ingested, 1);
     } finally {
       for (const d of [ws, codexRoot]) rmSync(d, { recursive: true, force: true });
     }

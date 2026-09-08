@@ -10,7 +10,7 @@
  */
 
 import { runIngestCodex } from '../lib/ingest-codex.mjs';
-import { isDruumenWorkspace, resolveStorageTarget } from '../lib/hook-common.mjs';
+import { druumenWorkspaceRoot, resolveStorageTarget } from '../lib/hook-common.mjs';
 import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
 import { formatJSON } from './format.mjs';
 
@@ -79,14 +79,18 @@ export async function run(argv) {
     process.exit(2);
   }
 
-  // The workspace is where you are standing. Refusing outside one is not
-  // politeness: gate 2 in lib/ingest-codex.mjs compares every rollout's cwd
-  // against this value, so a wrong value here would quietly widen the scan
-  // instead of failing.
-  const workspaceRoot = process.cwd();
-  if (!isDruumenWorkspace(workspaceRoot)) {
+  // The workspace you are standing IN — ascended, not `process.cwd()` raw.
+  //
+  // Raw cwd was wrong in a way that only showed up end to end: running from
+  // `<workspace>/products/web`, `resolveStorageTarget` found no database at
+  // that exact directory and fell back to `{root: <that directory>}`, so the
+  // writer created a SECOND database under it while the gate vouched for the
+  // workspace's real one. Ascending first makes both the gate and the storage
+  // anchor on the same workspace no matter where in it you stand.
+  const workspaceRoot = druumenWorkspaceRoot(process.cwd());
+  if (workspaceRoot === null) {
     process.stderr.write(
-      `error: not a Druumen workspace: ${workspaceRoot}\n` +
+      `error: not inside a Druumen workspace: ${process.cwd()}\n` +
       '  Run this from the workspace whose database you want to fill.\n',
     );
     process.exit(1);

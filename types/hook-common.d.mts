@@ -36,6 +36,20 @@ export function readStdinJson({ timeoutMs }?: {
  */
 export function isDruumenWorkspace(cwd: string): boolean;
 /**
+ * WHICH workspace `cwd` belongs to — the same ascent `isDruumenWorkspace`
+ * does, returning the directory instead of a boolean.
+ *
+ * Split out rather than duplicated: a caller standing in
+ * `<workspace>/products/web` needs the workspace itself (to anchor storage and
+ * a gate on it), and re-implementing the walk is how the two answers drift.
+ * `isDruumenWorkspace` is now this function plus a null check, so there is
+ * exactly one ascent in the package.
+ *
+ * @param {string} cwd
+ * @returns {string|null} the workspace root, or null when `cwd` is not inside one
+ */
+export function druumenWorkspaceRoot(cwd: string): string | null;
+/**
  * Does `dir` ITSELF already hold an initialized sessions-db (either storage
  * convention: cockpit-marketplace `.dru-code/` or druumen-monorepo
  * `tickets/_logs/`)? No ancestor walk — the question is specifically "is this
