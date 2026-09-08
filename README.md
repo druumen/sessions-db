@@ -396,6 +396,21 @@ channel a human sets by hand.
 The rule is still the same as below — pin one version per machine rather
 than mixing.
 
+### Version skew: an old reader turns a codex session into a blank record
+
+A pre-0.5.0 reducer treats `codex_session_seen` as an unknown op. That is
+**not** a no-op, for the same structural reason `session_prune` was not:
+`applyEvent` creates the session record for *any* op before dispatching on it,
+so an older reader folding a log that contains codex events produces a record
+with a stable_id, an `event_count` and nothing else — no `source`, no
+`codex_session_ids`, no cwd, no prompt. It looks exactly like a ghost, which
+is the one shape `prune` is built to delete.
+
+Recoverable: `events.jsonl` keeps every row and a 0.5.0 `rebuild` restores the
+fields. But `prune` running under the old reader in between would tombstone
+records whose only sin is being newer than the reader — so on a machine that
+mixes versions, do not prune. Pin one version per machine.
+
 ### Version skew: an old reader DROPS `pr_links` on a rebuild
 
 A pre-0.4.0 reducer treats `pr_link_seen` as an unknown op — a no-op that

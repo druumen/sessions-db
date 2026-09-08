@@ -23,7 +23,9 @@ export function emptySession(stableId: string, ts: string): {
     names: any[];
     display_name: any;
     display_name_channel: any;
+    source: string;
     claude_session_ids: any[];
+    codex_session_ids: any[];
     pr_links: any[];
     transcript_files: any[];
     fingerprints: {

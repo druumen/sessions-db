@@ -87,6 +87,11 @@ export type IdentityConfidence = "exact" | "high" | "low" | "minted";
  *                      `{ channel, value, source?, observed_from?, observed_at? }`.
  *                      `channel` / `source` are OPEN strings — the reducer must
  *                      preserve ones it does not recognise (see NameChannel)
+ *   codex_session_seen — a session observed in a codex rollout file, written
+ *                      by `sessions-db ingest-codex` (never by a hook — codex
+ *                      fires none). Carries `source: 'codex'` and the rollout
+ *                      id on its own axis; see lib/ingest-codex.mjs for the
+ *                      two gates that decide what may be recorded at all.
  *   pr_link_seen     — a merge request this session opened, harvested from
  *                      Claude Code's `pr-link` transcript record. Union-merged
  *                      into `pr_links[]` (see lib/pr-links.mjs); identity is
@@ -95,7 +100,7 @@ export type IdentityConfidence = "exact" | "high" | "low" | "minted";
  *                      projection. Append-only — the prior events stay in
  *                      events.jsonl and the reducer re-deletes on replay.
  */
-export type EventOp = "session_seen" | "session_progress" | "session_link" | "session_unlink" | "alias_set" | "parent_set" | "close" | "sweep" | "manual_link" | "ai_title_seen" | "name_set" | "pr_link_seen" | "session_prune";
+export type EventOp = "session_seen" | "session_progress" | "session_link" | "session_unlink" | "alias_set" | "parent_set" | "close" | "sweep" | "manual_link" | "ai_title_seen" | "name_set" | "pr_link_seen" | "codex_session_seen" | "session_prune";
 /**
  * Naming channel — WHICH surface produced a name.
  *
@@ -351,6 +356,17 @@ export type KnownSession = {
      * shows.
      */
     display_name_channel?: (NameChannel | null);
+    /**
+     * Which agent produced the session. Optional in the type for the
+     * same reason `names` is: records written before 0.5.0 have no such
+     * field and are shimmed to `claude` on load.
+     */
+    source?: ("claude" | "codex");
+    /**
+     * Codex rollout ids. A separate axis from `claude_session_ids`,
+     * which carries Claude-specific identity resolution.
+     */
+    codex_session_ids?: string[];
     claude_session_ids: ClaudeSessionId[];
     /**
      * MRs this session opened. Optional in the type for the same reason

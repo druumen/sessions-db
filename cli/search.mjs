@@ -51,6 +51,10 @@ import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
 import { formatJSON, pickLabel, relTime, shouldUseColor, truncateStableId } from './format.mjs';
 
 const VALID_STATES = new Set(['active', 'idle', 'archived']);
+/** Sources a session can come from. Open in the data model (a future agent
+ * adds a value), closed at the CLI so a typo is an error rather than an empty
+ * result. Extend both this set and the help text together. */
+const VALID_SOURCES = new Set(['claude', 'codex']);
 
 const SPEC = {
   positional: [{ name: 'query', required: true }],
@@ -59,6 +63,7 @@ const SPEC = {
     '--deep': { type: 'boolean' }, // alias for --content
     '--include-history': { type: 'boolean' },
     '--state': { type: 'string' },
+    '--source': { type: 'string' },
     '--limit': { type: 'number', default: 20 },
     '--max-file-mb': { type: 'number', default: 32 },
     '--json': { type: 'boolean' },
@@ -75,6 +80,7 @@ export const HELP = formatHelp({
     { name: '--content',       desc: 'also scan transcript message text + return a snippet (slow)' },
     { name: '--deep',          desc: 'alias for --content' },
     { name: '--include-history', desc: 'also search names the sessions no longer have (folds the event log)' },
+    { name: '--source <s>',   desc: 'only claude or only codex sessions (default: both)' },
     { name: '--state <s>',     desc: 'restrict to active | idle | archived' },
     { name: '--limit <N>',     desc: 'cap result count (default 20)' },
     { name: '--max-file-mb <N>', desc: 'skip transcript files larger than N MB (default 32)' },
@@ -96,15 +102,26 @@ export const HELP = formatHelp({
  *
  * @returns {Array<{ session: object, matched_in: string[] }>}
  */
-export function searchByMetadata(projection, query, { state } = {}) {
+/**
+ * `source` filters by which agent produced the session (`claude` / `codex`).
+ * Records written before that field existed are treated as `claude` — they
+ * could not have been anything else — so the filter never hides history.
+ */
+export function searchByMetadata(projection, query, { state, source } = {}) {
   const sessions = projection && projection.sessions ? projection.sessions : {};
   const out = [];
   for (const s of Object.values(sessions)) {
     if (state && s.activity_state !== state) continue;
+    if (source && sessionSource(s) !== source) continue;
     const hits = matchSessionMetadata(s, query);
     if (hits.length > 0) out.push({ session: s, matched_in: hits });
   }
   return sortByRecencyDesc(out);
+}
+
+/** @param {object} s @returns {string} the session's source, defaulting to claude */
+export function sessionSource(s) {
+  return typeof s.source === 'string' && s.source.length > 0 ? s.source : 'claude';
 }
 
 function sortByRecencyDesc(rows) {
@@ -270,7 +287,17 @@ export async function run(argv) {
     process.exit(2);
   }
 
+  // Validated the same way `--state` is: an unknown value must be an
+  // argparse error, not a filter that silently matches nothing. A typo'd
+  // `--source codx` returning zero rows looks exactly like "you have no codex
+  // sessions", which is the wrong thing to learn from a typo.
+  if (parsed.flags['--source'] !== undefined && !VALID_SOURCES.has(parsed.flags['--source'])) {
+    process.stderr.write(`error: --source must be one of: ${[...VALID_SOURCES].join(', ')}\n`);
+    process.exit(2);
+  }
+
   const state = parsed.flags['--state'];
+  const source = parsed.flags['--source'];
   const limit = parsed.flags['--limit'] > 0 ? parsed.flags['--limit'] : 20;
   const wantContent = parsed.flags['--content'] === true || parsed.flags['--deep'] === true;
   const wantHistory = parsed.flags['--include-history'] === true;
@@ -282,7 +309,7 @@ export async function run(argv) {
   // Tier 1 — metadata (current names included). Build a map so the later
   // passes can merge matched_in.
   const byId = new Map();
-  for (const { session, matched_in } of searchByMetadata(projection, query, { state })) {
+  for (const { session, matched_in } of searchByMetadata(projection, query, { state, source })) {
     byId.set(session.stable_id, {
       session,
       matched_in: [...matched_in],
@@ -335,6 +362,11 @@ export async function run(argv) {
     const sessions = projection && projection.sessions ? projection.sessions : {};
     for (const s of Object.values(sessions)) {
       if (state && s.activity_state !== state) continue;
+      // The same filter as the metadata tier above. It has to be repeated
+      // because this loop iterates the projection itself rather than the
+      // metadata results — a filter applied on only one of the two tiers is
+      // how `--source` would silently leak rows in `--content` mode.
+      if (source && sessionSource(s) !== source) continue;
       const hit = await scanSessionContent(s, query, { maxFileMb, cache });
       if (!hit) continue;
       // Tag disk-discovered hits so coverage gaps are visible in output.
@@ -372,7 +404,9 @@ export async function run(argv) {
           first_prompt_preview: r.session.first_prompt_preview ?? null,
           activity_state: r.session.activity_state ?? null,
           last_progress_at: r.session.last_progress_at ?? null,
+          source: sessionSource(r.session),
           claude_session_ids: r.session.claude_session_ids ?? [],
+          codex_session_ids: r.session.codex_session_ids ?? [],
           // MRs this session opened. Present as [] rather than omitted so a
           // consumer can tell "none" from "this row was written by a version
           // that did not know about them" — the same reason every other list
@@ -403,9 +437,12 @@ function formatSearchList(results, { wantContent } = {}) {
   for (const r of results) {
     const id = truncateStableId(r.session.stable_id);
     const state = r.session.activity_state || '?';
+    // Only codex rows are tagged. Tagging both would add a column to every
+    // line of every existing user's output to state the default.
+    const src = sessionSource(r.session) === 'codex' ? ' [codex]' : '';
     const label = pickLabel(r.session).text;
     const when = relTime(r.session.last_progress_at);
-    lines.push(`${id}  ${state.padEnd(8)}  ${label}  (${when})`);
+    lines.push(`${id}  ${state.padEnd(8)}  ${label}${src}  (${when})`);
     lines.push(`    matched: ${r.matched_in.join(', ')}`);
     // Spell out current-vs-former per matched name. A result whose only hit is
     // a name the session lost looks identical to any other hit otherwise, and
