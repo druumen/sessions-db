@@ -26,16 +26,18 @@
  *   - default: compact human list
  *   - --json:  array of { stable_id, alias, display_name, display_name_channel,
  *              first_prompt_preview, activity_state, last_progress_at,
- *              claude_session_ids, matched_in, snippet, name_hits }
+ *              claude_session_ids, pr_links, names, matched_in, snippet,
+ *              name_hits }
  */
 
 import { formatPrLink } from '../lib/pr-links.mjs';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
-import { displayNameForSession, foldNameHistory } from '../lib/names.mjs';
+import { CHANNEL_FIRST_PROMPT, displayNameForSession, foldNameHistory } from '../lib/names.mjs';
 import { loadProjection, readAllEvents } from '../lib/storage.mjs';
 import {
+  distinctCurrentNames,
   extractSnippet,
   matchCurrentNames,
   matchNameHistory,
@@ -369,6 +371,32 @@ export async function run(argv) {
           alias: r.session.alias ?? null,
           display_name: display.display_name,
           display_name_channel: display.display_name_channel,
+          // Every name the session currently answers to. `display_name` above
+          // can only be ONE of them — the precedence chain picks a winner and
+          // the losers become unreachable, which is what this closes: measured
+          // on the reference database 2026-09-08 (688 sessions), 486 carry a
+          // `cc_ai_title` and 32 of those are outranked by an `alias` or a
+          // hand-typed `cc_custom_title`. For those 32, the title on the user's
+          // own Claude Code tab was the one name a UUID / branch / cwd lookup
+          // could not show them.
+          //
+          // NOT folded into `name_hits`: that field answers "which name caused
+          // this hit", so a UUID query correctly reports none. Widening it
+          // would destroy the only signal that separates a name match from any
+          // other match.
+          //
+          // `[]` rather than omitted, for the same reason `pr_links` is below.
+          //
+          // Deliberately the STORED array and not the resolved display map: the
+          // legacy `alias` / `ai_title` mirrors carry no `set_at` / `source`,
+          // and synthesising those would make a derived guess indistinguishable
+          // from a recorded fact. The consequence is real and worth knowing —
+          // on that same database all 29 aliases live in the legacy mirror and
+          // NONE as a `names[]` entry (a `rebuild` recovers all 29 from the
+          // log), so a stale cache under-reports this array. It never costs the
+          // caller the name itself: `alias` and `display_name` are on the row
+          // either way, and the human formatter reads the display map.
+          names: r.session.names ?? [],
           first_prompt_preview: r.session.first_prompt_preview ?? null,
           activity_state: r.session.activity_state ?? null,
           last_progress_at: r.session.last_progress_at ?? null,
@@ -392,6 +420,47 @@ export async function run(argv) {
   process.stdout.write(formatSearchList(results, { useColor, wantContent }));
 }
 
+/**
+ * The current names a result row does not already show, one line each.
+ *
+ * A row displays exactly one name — the precedence chain's winner — so every
+ * other channel is invisible on it. That is not a corner case: on the
+ * reference database (688 sessions, measured 2026-09-08) 486 carry a
+ * `cc_ai_title` and 32 of those are outranked, i.e. for 32 sessions the title
+ * the user reads off their own tab is the one name the row could not show.
+ * The other 656 print nothing extra, which is the point — this adds a line
+ * only where a name was actually being hidden.
+ *
+ * Deduped by VALUE and against what this row already printed, not merely by
+ * channel: `agent_name` mirrors `cc_ai_title` (on that database all 3 of the
+ * agent-badged sessions whose badge differed from the display name held a
+ * badge byte-identical to their ai title), and a `name [...]` line above has
+ * already spelled out whatever the query matched. Both dedups are what keep
+ * the same string from appearing twice under two labels.
+ *
+ * `first_prompt` is skipped for the same reason `matchCurrentNames` skips it:
+ * it is the display fallback, not a name anybody gave the session.
+ *
+ * @param {object} session
+ * @param {Set<string>} shown values already printed for this row
+ */
+function hiddenNameLines(session, shown) {
+  const { display_name } = displayNameForSession(session);
+  const seen = new Set(shown);
+  if (display_name !== null) seen.add(display_name);
+  const lines = [];
+  for (const [channel, value] of distinctCurrentNames(session)) {
+    if (channel === CHANNEL_FIRST_PROMPT) continue;
+    // Whitespace-only is not a name — the same rule `resolveDisplayName`
+    // applies when it decides a channel cannot win the display.
+    if (value.trim().length === 0) continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    lines.push(`    also ${channel}: ${value}`);
+  }
+  return lines;
+}
+
 function formatSearchList(results, { wantContent } = {}) {
   if (results.length === 0) {
     return wantContent
@@ -411,12 +480,18 @@ function formatSearchList(results, { wantContent } = {}) {
     // a name the session lost looks identical to any other hit otherwise, and
     // the user would have no way to see why the row does not contain the text
     // they searched for.
+    const shownNames = new Set();
     for (const hit of r.name_hits ?? []) {
       // The timestamp is when that value was SET, not when it stopped being
       // current — the log records renames, not their expiry.
       const when = hit.set_at ? `, set ${hit.set_at}` : '';
       lines.push(`    name [${hit.kind}] ${hit.channel}${when}: ${hit.value}`);
+      shownNames.add(hit.value);
     }
+    // …and the names nothing above showed. A hit on a UUID / branch / cwd
+    // produces no `name` line at all, so without this the row stays silent
+    // about what the session is called beyond its single display label.
+    lines.push(...hiddenNameLines(r.session, shownNames));
     // MRs the session opened. Printed for every result, not only for `pr`
     // hits: when you have found the session you almost always want the number,
     // and it is one short line.
