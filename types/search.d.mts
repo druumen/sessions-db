@@ -88,7 +88,7 @@ export function matchSessionMetadata(session: any, query: any): string[];
  * blocks ({ type, text }). Returns '' for anything else (tool_use, thinking,
  * queue-operation, attachment, ...).
  */
-export function recordText(record: any): string;
+export function recordText(record: any): any;
 /**
  * Return a whitespace-collapsed snippet around the first case-insensitive
  * occurrence of `query` in `text`, with `ctx` chars of context each side and

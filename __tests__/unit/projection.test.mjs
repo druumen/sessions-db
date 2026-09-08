@@ -1004,6 +1004,44 @@ describe('projection.mjs', () => {
     // `pr_links` is gone → 0.4.0 reads the hot cache and still sees nothing →
     // an explicit 0.4.0 `rebuild` brings it back.
     // -----------------------------------------------------------------------
+    // Same family, added with `codex_session_seen` (0.5.0). This one is worse
+    // than the pr_links case: an unknown op still CREATES the record, so an
+    // old reader turns every codex session into a fieldless husk that `prune`
+    // would classify as a ghost.
+    it('an old reducer (no codex_session_seen case) leaves a blank husk — README "Version skew"', () => {
+      const preCodexApply = (projection, event) => {
+        const { op, stable_id: stableId, ts } = event;
+        let session = projection.sessions[stableId];
+        if (!session) {
+          session = emptySession(stableId, ts);
+          projection.sessions[stableId] = session;
+        }
+        // No `case 'codex_session_seen'` — the record is created and then
+        // nothing fills it in.
+        projection._meta.event_count += 1;
+        return projection;
+      };
+
+      const events = [evt('codex_session_seen', TS_A, {
+        codex_session_id: '01a07d1a-4180-7ab3-be8c-336dc7f2bab3',
+        cwd: '/tmp/ws',
+        first_prompt_preview: 'the prompt that goes missing',
+      })];
+
+      const current = rebuildFromEvents(events);
+      assert.equal(current.sessions[SID].source, 'codex',
+        'control: the current reducer does fill the record');
+      assert.equal(current.sessions[SID].first_prompt_preview, 'the prompt that goes missing');
+
+      const old = emptyProjection();
+      for (const e of events) preCodexApply(old, e);
+      assert.ok(old.sessions[SID], 'the record exists — an unknown op still creates it');
+      assert.equal(old.sessions[SID].source, 'claude', 'and it claims to be a Claude session');
+      assert.equal(old.sessions[SID].first_prompt_preview, null,
+        'with nothing in it — this is the husk `prune` would call a ghost');
+      assert.equal(old._meta.event_count, 1, 'while still counting the event');
+    });
+
     it('an old reducer (no pr_link_seen case) drops pr_links — README "Version skew"', () => {
       // `applyEvent` minus the one case, which is exactly what 0.3.0 is.
       const prePrLinkApply = (projection, event) => {

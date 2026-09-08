@@ -297,6 +297,60 @@ export function recordSessionSeen(opts: {
     error?: string;
 }>;
 /**
+ * Resolve the on-disk file triple for the current operation.
+ *
+ * Three input shapes are supported (priority order, first hit wins) so all
+ * three storage-call patterns from Days 1-3 keep working unmodified:
+ *
+ *   1. `opts.paths` — fully-formed override (legacy form used by storage
+ *      tests). Each field may be absolute (tests pin a tmpdir explicitly) or
+ *      relative; relative paths anchor on `opts.root` (or cwd).
+ *
+ *   2. `opts.rootPath` — Day 4 single-arg form. Delegates to
+ *      `resolveStoragePaths` so the canonical filenames + ascend chain apply
+ *      uniformly. Library consumers (cockpit, init wizard) pass this.
+ *
+ *   3. `opts.root` — operations.mjs / wrapper form. Treated as a root
+ *      override that combines with the canonical PATHS layout (relative
+ *      segments) so existing operations callsites keep their behavior.
+ *
+ *   4. (default) — no override → `resolveStoragePaths()` with no args runs
+ *      the full env > existing-storage > default chain anchored on cwd.
+ *
+ * Why preserve the legacy `opts.paths` shape verbatim instead of routing
+ * everything through `resolveStoragePaths`? Existing storage unit tests
+ * pass `paths.eventsJsonl = join(tmpdir, 'events.jsonl')` (NOT
+ * `sessions-db-events.jsonl`) — switching the resolver would force every
+ * test to know the canonical filename. The legacy shape stays a 1-line
+ * passthrough so 350+ existing tests keep working.
+ *
+ * @param {{ paths?: { eventsJsonl: string, projectionJson: string, lockFile: string },
+ *           rootPath?: string, root?: string, cwd?: string }} opts
+ * @returns {{ eventsPath: string, projectionPath: string, lockPath: string }}
+ */
+/**
+ * Exported because a caller that GATES on "which database am I writing" must
+ * ask the writer, not a second resolver. `lib/paths.mjs` ascends to find an
+ * existing database; this one, for `{root: X}`, writes to `X/tickets/_logs/`
+ * without ascending. Review reproduced what that gap costs: an ingest run in
+ * a subdirectory gated on the workspace's real database while its events
+ * landed in a NEW database under the subdirectory — the gate vouching for a
+ * file the run never touched, and `search` finding nothing afterwards.
+ *
+ * @param {{ paths?: object, rootPath?: string, root?: string, cwd?: string }} opts
+ * @returns {{ eventsPath: string, projectionPath: string, lockPath: string }}
+ */
+export function resolveWritePaths(opts: {
+    paths?: object;
+    rootPath?: string;
+    root?: string;
+    cwd?: string;
+}): {
+    eventsPath: string;
+    projectionPath: string;
+    lockPath: string;
+};
+/**
  * Hard cap on a single event's serialized size (line bytes including the
  * trailing newline). Set to 4 KiB — the conservative POSIX `PIPE_BUF` lower
  * bound that guarantees `O_APPEND + write(2)` is atomic on regular files
