@@ -25,9 +25,18 @@ export function storageWorkspaceRoot(storage?: {
  * `/a/workspace-old` starts with `/a/workspace` and is a DIFFERENT directory.
  */
 export function isInside(parent: any, child: any): boolean;
+/** Admit a sibling worktree only when git proves it belongs to this checkout.
+ * A subdirectory database cannot widen its boundary to the whole repository.
+ */
+export function isWorkspaceCheckout(workspace: any, cwd: any): boolean;
+/** Repository identity comes from the cwd, never an inherited GIT_DIR. */
+export function gitWorkspace(cwd: any): {
+    root: string;
+    commonDir: string;
+};
 /**
  * @param {{workspaceRoot: string, storage?: object, dryRun?: boolean,
- *   limit?: number, codexRoot?: string, now?: string}} opts
+ *   limit?: number, codexRoot?: string, sessionId?: string, now?: string}} opts
  * @returns {Promise<{ok: boolean, dryRun: boolean, scanned: number,
  *   unparseable: number, skippedNotWorkspace: number, skippedOtherWorkspace: number,
  *   alreadyKnown: number, ingested: number,
@@ -41,6 +50,7 @@ export function runIngestCodex(opts?: {
     dryRun?: boolean;
     limit?: number;
     codexRoot?: string;
+    sessionId?: string;
     now?: string;
 }): Promise<{
     ok: boolean;

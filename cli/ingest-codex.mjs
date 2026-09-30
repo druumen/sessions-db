@@ -10,7 +10,7 @@
  */
 
 import { runIngestCodex } from '../lib/ingest-codex.mjs';
-import { druumenWorkspaceRoot, resolveStorageTarget } from '../lib/hook-common.mjs';
+import { druumenWorkspaceRoot, resolveStorageTarget, looksLikeUuid } from '../lib/hook-common.mjs';
 import { ArgparseError, formatHelp, parseArgs } from './argparse.mjs';
 import { formatJSON } from './format.mjs';
 
@@ -21,6 +21,7 @@ const SPEC = {
     '--dry-run': { type: 'boolean' },
     '--limit': { type: 'number' },
     '--codex-root': { type: 'string' },
+    '--session-id': { type: 'string' },
     '--json': { type: 'boolean' },
     '--root': { type: 'string' },
     '--quiet': { type: 'boolean' },
@@ -35,8 +36,8 @@ export const HELP = formatHelp({
     'sessions. DRY RUN BY DEFAULT: pass --yes to write.\n\n' +
     'Two gates, both refusals by default:\n' +
     '  - the rollout\'s cwd must be a Druumen workspace (same rule as the hooks)\n' +
-    '  - and it must be INSIDE the workspace that owns this database, so a\n' +
-    '    personal or unrelated directory never lands here.\n\n' +
+    '  - and it must belong to the database workspace (including sibling\n' +
+    '    git worktrees); personal or unrelated repositories never land here.\n\n' +
     'Records land with source="codex" and their id in codex_session_ids[] —\n' +
     'never in claude_session_ids[], which carries Claude-specific identity\n' +
     'resolution. Timestamps come from the rollout, not from the ingest clock.',
@@ -45,6 +46,7 @@ export const HELP = formatHelp({
     { name: '--dry-run',        desc: 'force report-only (the default; explicit for scripts)' },
     { name: '--limit <n>',      desc: 'stop after n newly ingested sessions (try a small run first)' },
     { name: '--codex-root <p>', desc: 'override ~/.codex/sessions (testing / archived corpora)' },
+    { name: '--session-id <id>', desc: 'read only this UUID; missing, ambiguous or refused sessions fail' },
     { name: '--json',           desc: 'JSON output (machine-readable)' },
     { name: '--root <p>',       desc: 'override storage root (default: this workspace)' },
     { name: '--quiet',          desc: 'silent stdout (exit code only)' },
@@ -73,6 +75,11 @@ export async function run(argv) {
   }
 
   const explicitDryRun = parsed.flags['--dry-run'] === true;
+  const sessionId = parsed.flags['--session-id'];
+  if (sessionId !== undefined && !looksLikeUuid(sessionId)) {
+    process.stderr.write('error: --session-id must be a UUID\n');
+    process.exit(2);
+  }
   const confirmed = parsed.flags['--yes'] === true;
   if (explicitDryRun && confirmed) {
     process.stderr.write('error: --dry-run and --yes are mutually exclusive\n');
@@ -105,6 +112,7 @@ export async function run(argv) {
     dryRun: !confirmed,
     ...(parsed.flags['--limit'] !== undefined ? { limit: parsed.flags['--limit'] } : {}),
     ...(parsed.flags['--codex-root'] ? { codexRoot: parsed.flags['--codex-root'] } : {}),
+    ...(sessionId ? { sessionId } : {}),
   });
 
   // A refusal and a failed write both have to reach the exit code, not just
@@ -120,6 +128,11 @@ export async function run(argv) {
         '  Run it from that workspace, or drop --root / DRUUMEN_SESSIONS_DB_ROOT.\n',
       );
     }
+    process.exit(1);
+  }
+  if (result.refused) {
+    if (parsed.flags['--json'] === true) process.stdout.write(formatJSON(result));
+    process.stderr.write(`error: ingest-codex ${sessionId || ''}: ${result.refused}\n`);
     process.exit(1);
   }
 
