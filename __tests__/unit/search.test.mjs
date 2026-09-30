@@ -89,6 +89,16 @@ describe('search — matchSessionMetadata', () => {
     assert.deepEqual(matchSessionMetadata(s, ''), []);
     assert.deepEqual(matchSessionMetadata(null, 'x'), []);
   });
+
+  it('matches Codex UUIDs without putting them on the Claude axis', () => {
+    const id = '01a0f10c-3a42-75a0-bdb2-e3f18765a655';
+    const codex = { source: 'codex', codex_session_ids: [id], claude_session_ids: [] };
+    assert.deepEqual(matchSessionMetadata(codex, id), ['codex_session_id']);
+    assert.deepEqual(matchSessionMetadata(codex, id.slice(0, 8).toUpperCase()), ['codex_session_id']);
+    assert.deepEqual(matchSessionMetadata(codex, 'unrelated'), []);
+    assert.deepEqual(matchSessionMetadata({ codex_session_ids: null }, id), []);
+    assert.deepEqual(matchSessionMetadata({ claude_session_ids: [id] }, id), ['claude_session_id']);
+  });
 });
 
 describe('search — recordText', () => {

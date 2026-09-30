@@ -20,6 +20,38 @@ across days and worktrees without losing the thread.
 
 **Local-only**: no network egress. All data stays on your machine.
 
+## Codex session indexing
+
+Metadata search indexes `codex_session_ids` as `codex_session_id`, alongside the
+separate Claude ID field. Historical rollouts can be imported selectively:
+
+```sh
+sessions-db ingest-codex --session-id <uuid>        # preview only this file
+sessions-db ingest-codex --session-id <uuid> --yes  # append the observation
+```
+
+Missing, ambiguous, mismatched or refused UUIDs fail rather than report an empty
+success. Sibling git worktrees are accepted only when their git common directory
+matches the database owner's checkout. A separate clone with the same remote is
+still another workspace.
+
+For current sessions, install `sessions-db-codex-hook` as a command handler for
+Codex `SessionStart`, `UserPromptSubmit` and `Stop`. It reads the current hook's
+runtime ID, cwd, prompt and transcript path from stdin without scanning other
+transcripts. Ordinary and linked checkouts use the owning checkout's database:
+an initialized `tickets/_logs` takes precedence, otherwise `.dru-code` is used.
+`DRUUMEN_SESSIONS_DB_ROOT` may override the storage directory, with the workspace
+gate still enforced. Hooks and importers resolve and write identities under the
+same projection lock. `DRUUMEN_SESSIONS_DB_STORE_PREVIEW=0|false` disables prompt previews.
+
+Preserve existing hook handlers and use an absolute command path. Codex skips
+new or changed non-managed handlers until reviewed and trusted via its `/hooks`
+interface; merely writing hooks.json does not activate them. See
+[OpenAI's Hooks documentation](https://learn.chatgpt.com/docs/hooks).
+
+The index remains local. Registration does not provide a live Codex messaging
+endpoint or cross-machine synchronization.
+
 ## Installation
 
 ```bash

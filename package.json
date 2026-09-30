@@ -10,7 +10,8 @@
   "bin": {
     "sessions-db": "./cli/sessions-db.mjs",
     "sessions-db-session-start": "./cli/sessions-db-session-start.mjs",
-    "sessions-db-user-prompt": "./cli/sessions-db-user-prompt.mjs"
+    "sessions-db-user-prompt": "./cli/sessions-db-user-prompt.mjs",
+    "sessions-db-codex-hook": "./cli/sessions-db-codex-hook.mjs"
   },
   "exports": {
     ".": {
