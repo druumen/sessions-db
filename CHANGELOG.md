@@ -49,6 +49,13 @@ it, so "which MR came out of this session" had no answer on the database side.
 
 ### Changed
 
+- **Repeated content searches reuse a disposable bounded transcript-text
+  cache.** Arbitrary case-insensitive substrings, message boundaries, first
+  snippets and cold early exit are preserved; changed or unusable cache entries
+  scan the source. Synthetic 127.71 MiB corpus: warm missing/late-hit scans were
+  about 10× faster, with extra cold-write costs. See
+  [cache behavior and reproducible measurements](docs/content-search-cache.md).
+
 - **`UserPromptSubmit` now harvests too (`lib/harvest.mjs`, extracted from the
   SessionStart hook).** From the second prompt onward the current title is in
   the database without the session being resumed. Cost, measured on the

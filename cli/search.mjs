@@ -31,18 +31,17 @@
  */
 
 import { formatPrLink } from '../lib/pr-links.mjs';
-import { createReadStream, existsSync, statSync } from 'node:fs';
-import { createInterface } from 'node:readline';
+import { existsSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 import { CHANNEL_FIRST_PROMPT, displayNameForSession, foldNameHistory } from '../lib/names.mjs';
-import { loadProjection, readAllEvents } from '../lib/storage.mjs';
+import { loadProjection, readAllEvents, resolveWritePaths } from '../lib/storage.mjs';
+import { scanTranscriptContent } from '../lib/search-cache.mjs';
 import {
   distinctCurrentNames,
-  extractSnippet,
   matchCurrentNames,
   matchNameHistory,
   matchSessionMetadata,
-  recordText,
 } from '../lib/search.mjs';
 import {
   listTranscriptFiles,
@@ -209,7 +208,7 @@ export async function discoverTranscriptPaths(session, cache, { maxFileMb = 32 }
  * workspace hash → claude_session_id match) so sessions the hook never linked
  * are still content-searchable. Returns the first snippet (+ file) or null.
  */
-async function scanSessionContent(session, query, { maxFileMb = 32, cache } = {}) {
+async function scanSessionContent(session, query, { maxFileMb = 32, cache, cacheDir } = {}) {
   const recorded = Array.isArray(session.transcript_files) ? session.transcript_files : [];
   let paths;
   let fromDisk = false;
@@ -228,42 +227,10 @@ async function scanSessionContent(session, query, { maxFileMb = 32, cache } = {}
     } catch {
       continue;
     }
-    const snippet = await scanFile(p, query);
+    const snippet = await scanTranscriptContent(p, query, { cacheDir });
     if (snippet) return { snippet, file: p, fromDisk };
   }
   return null;
-}
-
-function scanFile(path, query) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (val) => {
-      if (done) return;
-      done = true;
-      try {
-        rl.close();
-        stream.destroy();
-      } catch {
-        // ignore
-      }
-      resolve(val);
-    };
-    const stream = createReadStream(path, { encoding: 'utf8' });
-    const rl = createInterface({ input: stream, crlfDelay: Infinity });
-    rl.on('line', (line) => {
-      if (done || !line) return;
-      let record;
-      try {
-        record = JSON.parse(line);
-      } catch {
-        return;
-      }
-      const snippet = extractSnippet(recordText(record), query);
-      if (snippet) finish(snippet);
-    });
-    rl.on('close', () => finish(null));
-    stream.on('error', () => finish(null));
-  });
 }
 
 export async function run(argv) {
@@ -361,6 +328,8 @@ export async function run(argv) {
   if (wantContent) {
     const maxFileMb = parsed.flags['--max-file-mb'] > 0 ? parsed.flags['--max-file-mb'] : 32;
     const cache = makeDiskCache();
+    const cacheDir = process.env.DRUUMEN_SESSIONS_DB_SEARCH_CACHE === '0' ? undefined :
+      join(dirname(resolveWritePaths(rootOpts).projectionPath), 'sessions-db-search-cache');
     const sessions = projection && projection.sessions ? projection.sessions : {};
     for (const s of Object.values(sessions)) {
       if (state && s.activity_state !== state) continue;
@@ -369,7 +338,7 @@ export async function run(argv) {
       // metadata results — a filter applied on only one of the two tiers is
       // how `--source` would silently leak rows in `--content` mode.
       if (source && sessionSource(s) !== source) continue;
-      const hit = await scanSessionContent(s, query, { maxFileMb, cache });
+      const hit = await scanSessionContent(s, query, { maxFileMb, cache, cacheDir });
       if (!hit) continue;
       // Tag disk-discovered hits so coverage gaps are visible in output.
       const label = hit.fromDisk ? 'content(disk)' : 'content';
