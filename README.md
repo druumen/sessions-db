@@ -30,6 +30,14 @@ sessions-db ingest-codex --session-id <uuid>        # preview only this file
 sessions-db ingest-codex --session-id <uuid> --yes  # append the observation
 ```
 
+Codex names are collected from `CODEX_HOME/session_index.jsonl` (default
+`~/.codex/session_index.jsonl`), not the rollout's prompt-derived `title`.
+They use the `codex_thread_name` channel; an operator `alias` still wins.
+The existing Codex hook refreshes the current UUID on its lifecycle events.
+For previously indexed records, run `sessions-db sync-codex-names` to preview,
+then add `--yes` to write. `--session-id <uuid>` restricts the refresh to one
+identity. This reads name metadata only and does not register other sessions.
+
 Missing, ambiguous, mismatched or refused UUIDs fail rather than report an empty
 success. Sibling git worktrees are accepted only when their git common directory
 matches the database owner's checkout. A separate clone with the same remote is
