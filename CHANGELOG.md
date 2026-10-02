@@ -52,8 +52,10 @@ it, so "which MR came out of this session" had no answer on the database side.
 - **Repeated content searches reuse a disposable bounded transcript-text
   cache.** Arbitrary case-insensitive substrings, message boundaries, first
   snippets and cold early exit are preserved; changed or unusable cache entries
-  scan the source. Synthetic 127.71 MiB corpus: warm missing/late-hit scans were
-  about 10× faster, with extra cold-write costs. See
+  scan the source. Cache format v2 verifies the source byte digest, preventing
+  stale snippets and missed matches when equal-length rewrites preserve the
+  metadata fingerprint. Warm searches reread bytes but avoid JSON parsing;
+  v1's metadata-only performance figures no longer apply. See
   [cache behavior and reproducible measurements](docs/content-search-cache.md).
 
 - **`UserPromptSubmit` now harvests too (`lib/harvest.mjs`, extracted from the
