@@ -11,16 +11,25 @@ const self = fileURLToPath(import.meta.url);
 if (process.argv[2] === '--worker') {
   const [root, mode, query] = process.argv.slice(3);
   let sourceOpens = 0;
+  let sourceBytes = 0;
+  let parsedRecords = 0;
+  const parse = JSON.parse;
+  JSON.parse = (...args) => { parsedRecords++; return parse(...args); };
   const snippets = [];
   const begin = performance.now();
   for (const f of readdirSync(join(root, 'data')).sort()) {
     snippets.push(await scanTranscriptContent(join(root, 'data', f), query, {
       cacheDir: mode === 'off' ? undefined : join(root, 'cache'),
-      openStream: (p, opts) => { sourceOpens++; return createReadStream(p, opts); },
+      openStream: (p, opts) => {
+        sourceOpens++;
+        const stream = createReadStream(p, opts);
+        stream.on('data', (chunk) => { sourceBytes += chunk.length; });
+        return stream;
+      },
     }));
   }
   process.stdout.write(JSON.stringify({ ms: performance.now() - begin,
-    maxRssMiB: process.resourceUsage().maxRSS / 1024, sourceOpens,
+    maxRssMiB: process.resourceUsage().maxRSS / 1024, sourceOpens, sourceBytes, parsedRecords,
     resultHash: createHash('sha256').update(JSON.stringify(snippets)).digest('hex') }));
 } else {
   const root = mkdtempSync(join(tmpdir(), 'sessions-search-benchmark-'));
@@ -63,7 +72,7 @@ if (process.argv[2] === '--worker') {
       const median = (values) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
       const summarize = (samples) => ({ medianMs: +median(samples.map((r) => r.ms)).toFixed(1),
         peakRssMiB: +Math.max(...samples.map((r) => r.maxRssMiB)).toFixed(1),
-        sourceOpens: samples[0].sourceOpens });
+        sourceOpens: samples[0].sourceOpens, sourceMiB: +(samples[0].sourceBytes / 1024 ** 2).toFixed(2), parsedRecords: samples[0].parsedRecords });
       const cacheBytes = readdirSync(join(root, 'cache')).filter((f) => f.endsWith('.bin'))
         .reduce((n, f) => n + statSync(join(root, 'cache', f)).size, 0);
       results.push({ query, off: summarize(baseline), cold: summarize(cold), warm: summarize(warm), cacheMiB: +(cacheBytes / 1024 ** 2).toFixed(2) });
