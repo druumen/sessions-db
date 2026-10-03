@@ -270,6 +270,7 @@ export function sortChannels(channels: any): any[];
 export const CHANNEL_ALIAS: "alias";
 export const CHANNEL_CC_CUSTOM_TITLE: "cc_custom_title";
 export const CHANNEL_CC_AI_TITLE: "cc_ai_title";
+export const CHANNEL_CODEX_THREAD_NAME: "codex_thread_name";
 export const CHANNEL_AGENT_NAME: "agent_name";
 /**
  * Pseudo-channel for `first_prompt_preview`. Never stored in `names[]` —
@@ -361,7 +362,7 @@ export const MAX_OBSERVED_FROM_LEN: 512;
  * preferable to shipping a schema whose derived fields quietly disagree with
  * the log they came from.
  */
-export const NAMES_MODEL_VERSION: 1;
+export const NAMES_MODEL_VERSION: 2;
 /**
  * Event ops that carry a name change. `alias_set` and `ai_title_seen` are the
  * pre-0.3.0 spellings; `name_set` is the general form every new write uses.
