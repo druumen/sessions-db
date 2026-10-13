@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSy
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { readCodexThreadNames, syncCodexNames } from '../../lib/codex-names.mjs';
 import { runCodexHook } from '../../lib/codex-hook.mjs';
 import { runIngestCodex } from '../../lib/ingest-codex.mjs';
@@ -16,9 +17,9 @@ const ID='01111111-1111-7111-8111-111111111111';
 const OTHER='02222222-2222-7222-8222-222222222222';
 const TS='2026-10-01T09:00:00.000Z';
 const LATER='2026-10-01T10:00:00.000Z';
-const CLI=new URL('../../cli/sessions-db.mjs',import.meta.url).pathname;
+const CLI=fileURLToPath(new URL('../../cli/sessions-db.mjs',import.meta.url));
 function fixture() {
-  const root=realpathSync(mkdtempSync(join(tmpdir(),'sdb-codex-names-')));
+  const root=realpathSync.native(mkdtempSync(join(tmpdir(),'sdb-codex-names-')));
   const ws=join(root,'workspace'),home=join(root,'codex');
   mkdirSync(ws);mkdirSync(home);writeFileSync(join(ws,'CLAUDE.md'),'Druumen Workspace');
   const storage={rootPath:join(ws,'.dru-code')};

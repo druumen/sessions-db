@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -48,8 +48,15 @@ describe('transcript.mjs — workspaceHashFromCwd', () => {
     assert.equal(workspaceHashFromCwd('/0 personal/留学/x'), '-0-personal----x');
   });
 
+  it('dash-encodes Windows drive and UNC paths', () => {
+    assert.equal(workspaceHashFromCwd('C:\\Users\\alice\\Code\\myproj.com'), 'C--Users-alice-Code-myproj-com');
+    assert.equal(workspaceHashFromCwd('C:/Users/alice/Code/myproj.com'), 'C--Users-alice-Code-myproj-com');
+    assert.equal(workspaceHashFromCwd('\\\\server\\share\\myproj'), '--server-share-myproj');
+  });
+
   it('throws on a non-absolute path', () => {
     assert.throws(() => workspaceHashFromCwd('relative/path'), /absolute path/);
+    assert.throws(() => workspaceHashFromCwd('C:relative'), /absolute path/);
     assert.throws(() => workspaceHashFromCwd(''), /absolute path/);
     assert.throws(() => workspaceHashFromCwd(null), /absolute path/);
   });
@@ -396,6 +403,27 @@ describe('transcript.mjs — extractLatestAiTitle', () => {
 });
 
 describe('transcript.mjs — listTranscriptFiles', () => {
+  it('discovers transcripts for Windows absolute paths and encoded hashes', () => {
+    const root = mkdtempSync(join(tmpdir(), 'windows-transcripts-'));
+    const previousRoot = process.env.DRUUMEN_CLAUDE_PROJECTS_ROOT;
+    try {
+      process.env.DRUUMEN_CLAUDE_PROJECTS_ROOT = root;
+      const hash = 'C--Users-alice-Code-myproj';
+      const dir = join(root, hash);
+      mkdirSync(dir);
+      const transcript = join(dir, 'session.jsonl');
+      writeFileSync(transcript, '{}\n');
+      writeFileSync(join(dir, 'notes.txt'), 'ignore');
+      for (const path of ['C:\\Users\\alice\\Code\\myproj', 'C:/Users/alice/Code/myproj', hash]) {
+        assert.deepEqual(listTranscriptFiles(path), [transcript]);
+      }
+    } finally {
+      if (previousRoot === undefined) delete process.env.DRUUMEN_CLAUDE_PROJECTS_ROOT;
+      else process.env.DRUUMEN_CLAUDE_PROJECTS_ROOT = previousRoot;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('returns [] for a non-existent workspace hash', () => {
     const out = listTranscriptFiles('-this-workspace-does-not-exist-xyz123');
     assert.deepEqual(out, []);

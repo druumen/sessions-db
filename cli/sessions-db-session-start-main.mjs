@@ -43,7 +43,8 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
+import { homedir } from 'node:os';
 
 import {
   findTranscriptByCsid,
@@ -412,7 +413,7 @@ function locateTranscript({ explicit, cwd, claudeSessionId }) {
 
   // Canonical path computation requires an absolute cwd; we only walk this
   // path when it is. (Layer 3 does not need the cwd, so it still runs.)
-  if (typeof cwd === 'string' && cwd.startsWith('/')) {
+  if (typeof cwd === 'string' && isAbsolute(cwd)) {
     let hash = null;
     try {
       hash = workspaceHashFromCwd(cwd);
@@ -420,13 +421,8 @@ function locateTranscript({ explicit, cwd, claudeSessionId }) {
       hash = null;
     }
     if (hash) {
-      const canonical = join(
-        process.env.HOME || '',
-        '.claude',
-        'projects',
-        hash,
-        `${claudeSessionId}.jsonl`,
-      );
+      const projectsRoot = process.env.DRUUMEN_CLAUDE_PROJECTS_ROOT || join(homedir(), '.claude', 'projects');
+      const canonical = join(projectsRoot, hash, `${claudeSessionId}.jsonl`);
       if (existsSync(canonical)) return canonical;
     }
   }
