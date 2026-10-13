@@ -35,7 +35,7 @@ const START_HOOK = join(HERE, '..', '..', 'cli', 'sessions-db-session-start.mjs'
 const FAKE_SID = 'aaaaaaaa-1111-2222-3333-444444444444';
 
 function mkTmp(prefix = 'prompt-hook-') {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  return realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
 }
 
 /**
@@ -122,7 +122,11 @@ function runScript(script, { cwd, stdin, env = {}, timeoutMs = 4000 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [script], {
       cwd: cwd || process.cwd(),
-      env: { ...process.env, ...env },
+      // HOME alone does not redirect os.homedir() on Windows.
+      env: { ...process.env,
+        ...(env.HOME ? { DRUUMEN_CLAUDE_PROJECTS_ROOT: join(env.HOME, '.claude', 'projects') } : {}),
+        ...env,
+      },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const outChunks = [];

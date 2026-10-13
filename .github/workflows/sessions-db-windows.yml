@@ -43,6 +43,15 @@ jobs:
           git diff --exit-code lib/index.cjs types/
         shell: bash
 
-      - name: Run tests (Node 22 native glob)
-        run: node --test "__tests__/**/*.test.mjs"
+      - name: Run library tests, then hook tests serially
+        # Hook safety tests temporarily rename the main modules. Keep them
+        # separate and serial, as npm test does on Linux, so another test
+        # cannot spawn a hook while its module is deliberately missing.
+        run: |
+          $libTests = @(Get-ChildItem __tests__ -Recurse -Filter *.test.mjs | Where-Object { $_.Directory.Name -ne 'hook' } | ForEach-Object { $_.FullName })
+          node --test @libTests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hookTests = @(Get-ChildItem __tests__/hook -Filter *.test.mjs | ForEach-Object { $_.FullName })
+          node --test --test-concurrency=1 @hookTests
+          exit $LASTEXITCODE
         shell: pwsh

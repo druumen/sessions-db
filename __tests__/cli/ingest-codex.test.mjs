@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { isInside, runIngestCodex, storageWorkspaceRoot } from '../../lib/ingest-codex.mjs';
 import { searchByMetadata } from '../../cli/search.mjs';
@@ -13,12 +14,13 @@ import { loadProjection } from '../../lib/storage.mjs';
 const CODEX_ID = '01a07d1a-4180-7ab3-be8c-336dc7f2bab3';
 const CODEX_ID_2 = '01a07d1a-4180-7ab3-be8c-336dc7f2bac4';
 
-// `realpathSync`, deliberately: macOS hands out `/var/folders/...` from
+// `realpathSync.native`, deliberately: macOS hands out `/var/folders/...` from
 // `os.tmpdir()` while a process started there reports `/private/var/...`.
 // Production normalises both sides of gate 2 for exactly this reason (a
 // symlinked checkout does the same thing to a real user), so a fixture that
 // kept the un-resolved spelling would be testing a world the CLI never sees.
-const mkTmp = (p = 'ingest-codex-') => realpathSync(mkdtempSync(join(tmpdir(), p)));
+// The native version also expands Windows 8.3 temp directory names.
+const mkTmp = (p = 'ingest-codex-') => realpathSync.native(mkdtempSync(join(tmpdir(), p)));
 
 /** A directory that passes `isDruumenWorkspace` (CLAUDE.md sentinel). */
 function mkWorkspace(prefix = 'ws-') {
@@ -243,7 +245,7 @@ describe('search — the source axis', () => {
  * leaks.
  */
 describe('search --content over codex rollouts (real CLI)', () => {
-  const CLI = new URL('../../cli/sessions-db.mjs', import.meta.url).pathname;
+  const CLI = fileURLToPath(new URL('../../cli/sessions-db.mjs', import.meta.url));
 
   function runCLI(argv, cwd) {
     return new Promise((resolve, reject) => {
@@ -519,7 +521,7 @@ describe('ingest-codex — a failed write is not a registration', () => {
  * the same file.
  */
 describe('ingest-codex — running from a subdirectory (real CLI)', () => {
-  const CLI2 = new URL('../../cli/sessions-db.mjs', import.meta.url).pathname;
+  const CLI2 = fileURLToPath(new URL('../../cli/sessions-db.mjs', import.meta.url));
 
   function runCLI2(argv, cwd) {
     return new Promise((resolve2, reject) => {

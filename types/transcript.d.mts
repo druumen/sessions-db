@@ -16,8 +16,8 @@
 /**
  * Convert an absolute filesystem path to the dash-encoded workspace hash that
  * Claude Code uses for the `~/.claude/projects/<hash>/` directory name. The
- * encoding replaces every path separator and dot with a dash and keeps the
- * leading dash that Claude Code itself prepends.
+ * encoding replaces every non-alphanumeric character with a dash, including
+ * the leading separator on POSIX and the drive separator on Windows.
  *
  * @param {string} cwd absolute path
  * @returns {string} e.g. `-Users-zm-leng-Documents-...-drummen-com-cn`
